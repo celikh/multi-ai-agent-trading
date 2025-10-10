@@ -131,6 +131,29 @@ REALITY_CHECKS = {
                 "alert_if_not": True
             }
         ]
+    },
+    "DEV-76": {
+        "title": "SL/TP order monitoring",
+        "checks": [
+            {
+                "name": "No SL/TP check errors (current hour)",
+                "command": "ssh mac-mini 'tail -200 ~/projects/multi-ai-agent-trading/logs/execution.log | strings | grep \"check_sl_tp_orders.*error\" | grep \"$(date +%H):\" | wc -l | tr -d \" \"'",
+                "expected": "0",
+                "alert_if_not": True
+            },
+            {
+                "name": "SL/TP checking mechanism present (code deployed)",
+                "command": "ssh mac-mini 'grep -c \"_check_sl_tp_orders\" ~/projects/multi-ai-agent-trading/agents/execution/agent.py'",
+                "expected_min": "2",
+                "alert_if_not": False
+            },
+            {
+                "name": "No SL/TP execution errors (current hour)",
+                "command": "ssh mac-mini 'tail -200 ~/projects/multi-ai-agent-trading/logs/execution.log | strings | grep \"execute_sl_tp_order.*error\" | grep \"$(date +%H):\" | wc -l | tr -d \" \"'",
+                "expected": "0",
+                "alert_if_not": True
+            }
+        ]
     }
 }
 

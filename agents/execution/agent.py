@@ -26,6 +26,7 @@ from agents.execution.execution_quality import (
 from agents.execution.position_manager import (
     PositionManager,
     PositionSide,
+    Position,
 )
 from infrastructure.database.postgresql import get_db, PostgreSQLDatabase
 from core.config.settings import settings
@@ -708,6 +709,9 @@ class ExecutionAgent(PeriodicAgent):
                         "position.update", position_msg, priority=7
                     )
 
+                    # DEV-76: Check SL/TP orders for this position
+                    await self._check_sl_tp_orders(position, current_price)
+
                 except Exception as e:
                     self.log_error(
                         e,
@@ -729,6 +733,205 @@ class ExecutionAgent(PeriodicAgent):
         except Exception as e:
             self.log_error(e, {"symbol": symbol, "operation": "fetch_current_price"})
             return None
+
+    async def _check_sl_tp_orders(self, position: Position, current_price: float) -> None:
+        """
+        Check SL/TP orders for position and trigger if price conditions met
+
+        Args:
+            position: Position to check
+            current_price: Current market price
+        """
+        try:
+            # Query open SL/TP orders for this position
+            query = """
+                SELECT order_id, order_type, price, quantity, side, status, metadata
+                FROM orders
+                WHERE symbol = $1
+                  AND status IN ('open', 'pending')
+                  AND order_type IN ('stop_loss', 'take_profit')
+                  AND metadata->>'position_id' = $2
+            """
+
+            orders = await self._db.fetch_all(query, position.symbol, position.position_id)
+
+            if not orders:
+                return  # No SL/TP orders for this position
+
+            self.logger.debug(
+                "checking_sl_tp_orders",
+                position_id=position.position_id,
+                symbol=position.symbol,
+                order_count=len(orders),
+                current_price=current_price
+            )
+
+            for order in orders:
+                order_type = order['order_type']
+                trigger_price = order['price']
+                order_id = order['order_id']
+
+                triggered = False
+
+                # Check SL trigger conditions
+                if order_type == 'stop_loss':
+                    if position.side == PositionSide.LONG and current_price <= trigger_price:
+                        triggered = True
+                    elif position.side == PositionSide.SHORT and current_price >= trigger_price:
+                        triggered = True
+
+                # Check TP trigger conditions
+                elif order_type == 'take_profit':
+                    if position.side == PositionSide.LONG and current_price >= trigger_price:
+                        triggered = True
+                    elif position.side == PositionSide.SHORT and current_price <= trigger_price:
+                        triggered = True
+
+                if triggered:
+                    self.logger.info(
+                        "sl_tp_order_triggered",
+                        order_id=order_id,
+                        order_type=order_type,
+                        position_id=position.position_id,
+                        symbol=position.symbol,
+                        trigger_price=trigger_price,
+                        current_price=current_price,
+                        side=position.side.value
+                    )
+
+                    # Execute the triggered order
+                    await self._execute_sl_tp_order(order, position, current_price)
+
+        except Exception as e:
+            self.log_error(
+                e,
+                {
+                    "position_id": position.position_id,
+                    "symbol": position.symbol,
+                    "operation": "check_sl_tp_orders"
+                }
+            )
+
+    async def _execute_sl_tp_order(
+        self,
+        order: Dict[str, Any],
+        position: Position,
+        current_price: float
+    ) -> None:
+        """
+        Execute triggered SL/TP order (close position)
+
+        Args:
+            order: Triggered order details
+            position: Position to close
+            current_price: Current market price
+        """
+        try:
+            order_id = order['order_id']
+            order_type = order['order_type']
+
+            # Create close order (opposite side of position)
+            close_side = "sell" if position.side == PositionSide.LONG else "buy"
+
+            self.logger.info(
+                "executing_sl_tp_order",
+                order_id=order_id,
+                order_type=order_type,
+                position_id=position.position_id,
+                symbol=position.symbol,
+                close_side=close_side,
+                quantity=position.quantity
+            )
+
+            # Execute market order to close position
+            exchange_order = await self.order_executor.execute_order(
+                symbol=position.symbol,
+                side=close_side,
+                order_type="market",
+                quantity=position.quantity,
+                reduce_only=True  # Close only, don't open new position
+            )
+
+            if exchange_order:
+                # Update order status in database
+                await self._db.execute(
+                    """
+                    UPDATE orders
+                    SET status = 'filled',
+                        filled_at = NOW(),
+                        filled_price = $1,
+                        metadata = metadata || jsonb_build_object('triggered_at', NOW())
+                    WHERE order_id = $2
+                    """,
+                    current_price,
+                    order_id
+                )
+
+                # Close position
+                self.position_manager.close_position(position.position_id, current_price)
+
+                # Update position in database
+                await self._db.execute(
+                    """
+                    UPDATE positions
+                    SET status = 'closed',
+                        exit_price = $1,
+                        exit_time = NOW(),
+                        realized_pnl = $2
+                    WHERE position_id = $3
+                    """,
+                    current_price,
+                    position.realized_pnl,
+                    position.position_id
+                )
+
+                self.logger.info(
+                    "sl_tp_order_executed",
+                    order_id=order_id,
+                    order_type=order_type,
+                    position_id=position.position_id,
+                    symbol=position.symbol,
+                    exit_price=current_price,
+                    realized_pnl=position.realized_pnl
+                )
+
+                # Publish position close event
+                close_msg = PositionUpdateMessage(
+                    source_agent=self.name,
+                    symbol=position.symbol,
+                    side=position.side.value,
+                    quantity=0,  # Position closed
+                    entry_price=position.entry_price,
+                    current_price=current_price,
+                    unrealized_pnl=0,
+                    realized_pnl=position.realized_pnl,
+                    metadata={
+                        "position_id": position.position_id,
+                        "trigger_type": order_type,
+                        "status": "closed"
+                    },
+                )
+
+                await self.publish_message("position.closed", close_msg, priority=8)
+
+            else:
+                self.logger.error(
+                    "sl_tp_order_execution_failed",
+                    order_id=order_id,
+                    order_type=order_type,
+                    position_id=position.position_id,
+                    symbol=position.symbol
+                )
+
+        except Exception as e:
+            self.log_error(
+                e,
+                {
+                    "order_id": order['order_id'],
+                    "position_id": position.position_id,
+                    "operation": "execute_sl_tp_order"
+                }
+            )
 
 
 async def main():
