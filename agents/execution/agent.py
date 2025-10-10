@@ -250,21 +250,18 @@ class ExecutionAgent(BaseAgent):
 
         # Publish execution report
         exec_report_msg = ExecReportMessage(
+            source_agent=self.agent_name,
             order_id=execution.order_id,
+            exchange=order.exchange,
             symbol=execution.symbol,
-            side=execution.side,
-            quantity=execution.filled_quantity,
+            side=execution.side.upper() if isinstance(execution.side, str) else execution.side,
+            status=execution.status,
+            filled_quantity=execution.filled_quantity,
             average_price=execution.average_fill_price,
-            total_cost=execution.total_cost,
-            fees=execution.fees,
-            slippage=report.slippage.slippage_percentage,
-            execution_time_ms=report.execution_time_ms,
-            quality_score=report.quality_score,
-            metadata={
-                "fills": len(fills),
-                "slippage_rating": report.slippage.quality_rating.value,
-                "cost_pct": report.costs.cost_percentage,
-            },
+            total_value=execution.total_cost,
+            fee=execution.fees,
+            fee_currency="USDT",  # TODO: Get from exchange
+            execution_time=execution_end,
         )
 
         await self.publish_message(

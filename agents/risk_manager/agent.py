@@ -147,6 +147,8 @@ class RiskManagerAgent(BaseAgent):
         await self.subscribe_topic("trade.intent", self._handle_trade_intent)
         # Subscribe to position updates
         await self.subscribe_topic("position.update", self._handle_position_update)
+        # Subscribe to execution reports to release reserved balance
+        await self.subscribe_topic("execution.report", self._handle_execution_report)
         # Subscribe to order status updates to release reserved balance
         await self.subscribe_topic("order.status", self._handle_order_status)
         self.logger.info("risk_manager_setup_complete")
@@ -409,6 +411,34 @@ class RiskManagerAgent(BaseAgent):
             active_positions=len(self.active_positions),
             portfolio_risk=self.current_portfolio_risk,
         )
+
+    async def _handle_execution_report(self, message: Any) -> None:
+        """Handle execution reports to release reserved balance"""
+        try:
+            order_id = getattr(message, 'order_id', None)
+            status = getattr(message, 'status', None)
+
+            if not order_id:
+                return
+
+            # Release reserved balance when order is filled
+            async with self.balance_lock:
+                if order_id in self.reserved_balance:
+                    reserved_amount = self.reserved_balance.pop(order_id)
+
+                    # Update actual balance (deduct the used amount)
+                    self.account_balance -= reserved_amount
+
+                    self.logger.info(
+                        "balance_released_after_execution",
+                        order_id=order_id,
+                        status=status,
+                        released_amount=reserved_amount,
+                        remaining_balance=self.account_balance,
+                        total_reserved=sum(self.reserved_balance.values()),
+                    )
+        except Exception as e:
+            self.log_error(e, {"handler": "execution_report"})
 
     async def _handle_order_status(self, message: Any) -> None:
         """Handle order status updates to release reserved balance"""
