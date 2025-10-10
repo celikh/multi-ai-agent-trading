@@ -51,14 +51,43 @@ REALITY_CHECKS = {
         "checks": [
             {
                 "name": "Table exists in database",
-                "command": "ssh mac-mini 'psql -h localhost -U postgres -d trading_system -c \"\\d positions\" 2>&1'",
-                "contains": ["Table"],
+                "command": "ssh mac-mini 'cd ~/projects/multi-ai-agent-trading && PGPASSWORD=trading123 venv/bin/python3 -c \"import asyncio; from infrastructure.database.postgresql import get_db; db = asyncio.run(get_db()); result = asyncio.run(db.fetch_one(\\\"SELECT COUNT(*) as count FROM information_schema.tables WHERE table_name=\\\\\\\"positions\\\\\\\"\\\"); print(\\\"exists\\\" if result and result[\\\\\\\"count\\\\\\\"] > 0 else \\\"missing\\\")\"; echo \"Table check: $?\"'",
+                "contains": ["exists"],
                 "alert_if_not": True
             },
             {
                 "name": "No relation not exist errors",
                 "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/risk_manager.log | grep -c \"positions.*does not exist\"'",
                 "expected": "0",
+                "alert_if_not": True
+            }
+        ]
+    },
+    "DEV-72": {
+        "title": "Data collection periodic execution",
+        "checks": [
+            {
+                "name": "Agent executing periodically",
+                "command": "ssh mac-mini 'tail -200 ~/projects/multi-ai-agent-trading/logs/data_collection.log | grep -c \"execute_started\"'",
+                "expected_min": "3",
+                "alert_if_not": True
+            },
+            {
+                "name": "Data being fetched successfully",
+                "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/data_collection.log | grep -c \"rest_data_fetched\"'",
+                "expected_min": "6",
+                "alert_if_not": True
+            },
+            {
+                "name": "No timeout errors",
+                "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/data_collection.log | grep -c \"RequestTimeout\"'",
+                "expected": "0",
+                "alert_if_not": True
+            },
+            {
+                "name": "Data in InfluxDB",
+                "command": "ssh mac-mini 'cd ~/projects/multi-ai-agent-trading && PYTHONPATH=. venv/bin/python3 scripts/check_data.py 2>&1 | grep -c \"Found 1 data\"'",
+                "expected": "1",
                 "alert_if_not": True
             }
         ]
@@ -121,6 +150,15 @@ def check_issue(issue_id: str, config: Dict) -> Dict:
         # Verify expected value
         if "expected" in check:
             check_result["passed"] = output == check["expected"]
+
+        # Verify minimum value
+        if "expected_min" in check:
+            try:
+                actual_value = int(output)
+                min_value = int(check["expected_min"])
+                check_result["passed"] = actual_value >= min_value
+            except ValueError:
+                check_result["passed"] = False
 
         # Verify contains
         if "contains" in check:
