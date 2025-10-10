@@ -255,25 +255,25 @@ class InfluxDBManager:
             data = []
             for table in result:
                 for record in table.records:
-                    timestamp = record.get_time()
+                    # Aggregation functions (stddev, mean, count) don't have _time
+                    # Use try-except to handle both cases
+                    try:
+                        timestamp = record.get_time()
+                        time_str = timestamp.isoformat() if timestamp else None
+                    except KeyError:
+                        # Aggregation result - no timestamp
+                        time_str = None
+
                     value = record.get_value()
 
-                    # Debug: Log successful query result structure
-                    logger.debug(
-                        "influx_query_result",
-                        timestamp_type=type(timestamp).__name__,
-                        value_type=type(value).__name__,
-                        has_timestamp=timestamp is not None,
-                    )
-
                     row = {
-                        "_time": timestamp.isoformat() if timestamp else None,
+                        "_time": time_str,
                         "_value": value,
                     }
                     # Add all fields and tags
-                    for key, value in record.values.items():
+                    for key, val in record.values.items():
                         if not key.startswith("_"):
-                            row[key] = value
+                            row[key] = val
                     data.append(row)
 
             return data
