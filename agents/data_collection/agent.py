@@ -169,13 +169,13 @@ class DataCollectionAgent(PeriodicAgent):
 
             if ohlcv and len(ohlcv) > 0:
                 latest = ohlcv[-1]
-                self._store_ohlcv(symbol, latest)  # Removed await - sync method
+                await self._store_ohlcv(symbol, latest)
                 self.logger.info("ohlcv_stored", symbol=symbol)
 
             # Fetch ticker
             ticker = await self._exchange.fetch_ticker(symbol)
             self.logger.info("ticker_fetched", symbol=symbol, price=ticker.get("last"))
-            self._store_ticker(symbol, ticker)  # Removed await - sync method
+            await self._store_ticker(symbol, ticker)
             self.logger.info("ticker_stored", symbol=symbol)
 
             # Fetch order book
