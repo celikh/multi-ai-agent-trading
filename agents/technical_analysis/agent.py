@@ -44,7 +44,7 @@ class TechnicalAnalysisAgent(PeriodicAgent):
     ):
         super().__init__(
             name="technical_analyzer",
-            agent_type="TECHNICAL_ANALYSIS",
+            agent_type="TECHNICAL",
             interval_seconds=interval,
             description="Analyzes market data using technical indicators",
         )

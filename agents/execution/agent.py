@@ -395,6 +395,9 @@ class ExecutionAgent(BaseAgent):
                 },
             )
 
+            # Store in database
+            await self._store_position_to_db(position)
+
             self.logger.info(
                 "position_opened",
                 position_id=position.position_id,
@@ -415,6 +418,7 @@ class ExecutionAgent(BaseAgent):
                 self.position_manager.increase_position(
                     position.position_id, quantity, price
                 )
+                await self._update_position_in_db(position)
                 self.logger.info(
                     "position_increased",
                     position_id=position.position_id,
@@ -425,6 +429,7 @@ class ExecutionAgent(BaseAgent):
                 self.position_manager.decrease_position(
                     position.position_id, quantity, price
                 )
+                await self._update_position_in_db(position)
                 self.logger.info(
                     "position_decreased",
                     position_id=position.position_id,
@@ -531,6 +536,95 @@ class ExecutionAgent(BaseAgent):
 
         except Exception as e:
             self.logger.error("store_execution_error", error=str(e))
+
+    async def _store_position_to_db(self, position: Any):
+        """Store position in database"""
+        try:
+            import json
+            from uuid import uuid4
+
+            query = """
+                INSERT INTO positions (
+                    id, exchange, symbol, side, quantity,
+                    entry_price, current_price, unrealized_pnl, realized_pnl,
+                    stop_loss, take_profit, leverage, margin, status,
+                    opened_at, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            """
+
+            await self._db.execute(
+                query,
+                uuid4(),
+                self.exchange_id,
+                position.symbol,
+                position.side.value.upper(),
+                position.quantity,
+                position.entry_price,
+                position.entry_price,  # current_price = entry_price initially
+                0.0,  # unrealized_pnl = 0 initially
+                position.realized_pnl,
+                position.stop_loss,
+                position.take_profit,
+                1.0,  # leverage default to 1.0
+                0.0,  # margin calculation TBD
+                position.status.value.upper(),
+                position.entry_time,
+                json.dumps(position.metadata if hasattr(position, 'metadata') else {}),
+            )
+
+            self.logger.debug("position_stored_to_db", position_id=position.position_id)
+
+        except Exception as e:
+            self.logger.error("store_position_error", error=str(e), position_id=getattr(position, 'position_id', 'unknown'))
+
+    async def _update_position_in_db(self, position: Any):
+        """Update position in database"""
+        try:
+            import json
+
+            # Determine if position should be closed
+            if position.quantity <= 0 or (hasattr(position, 'status') and position.status.value == 'closed'):
+                query = """
+                    UPDATE positions
+                    SET quantity = $1, current_price = $2, unrealized_pnl = $3, realized_pnl = $4,
+                        status = 'CLOSED', closed_at = NOW(), metadata = $5
+                    WHERE symbol = $6 AND exchange = $7 AND status = 'OPEN'
+                """
+                await self._db.execute(
+                    query,
+                    position.quantity,
+                    position.entry_price,
+                    position.unrealized_pnl,
+                    position.realized_pnl,
+                    json.dumps(position.metadata if hasattr(position, 'metadata') else {}),
+                    position.symbol,
+                    self.exchange_id,
+                )
+                self.logger.debug("position_closed_in_db", position_id=position.position_id)
+            else:
+                query = """
+                    UPDATE positions
+                    SET quantity = $1, current_price = $2, unrealized_pnl = $3, realized_pnl = $4,
+                        stop_loss = $5, take_profit = $6, metadata = $7
+                    WHERE symbol = $8 AND exchange = $9 AND status = 'OPEN'
+                """
+                await self._db.execute(
+                    query,
+                    position.quantity,
+                    position.entry_price,
+                    position.unrealized_pnl,
+                    position.realized_pnl,
+                    position.stop_loss,
+                    position.take_profit,
+                    json.dumps(position.metadata if hasattr(position, 'metadata') else {}),
+                    position.symbol,
+                    self.exchange_id,
+                )
+                self.logger.debug("position_updated_in_db", position_id=position.position_id)
+
+        except Exception as e:
+            self.logger.error("update_position_error", error=str(e), position_id=getattr(position, 'position_id', 'unknown'))
 
 
 async def main():

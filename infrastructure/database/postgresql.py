@@ -135,6 +135,8 @@ class PostgreSQLDatabase:
         **kwargs: Any,
     ) -> str:
         """Insert a new trading signal"""
+        import json
+
         query = """
             INSERT INTO signals (
                 agent_type, agent_name, symbol, signal_type, confidence,
@@ -154,8 +156,8 @@ class PostgreSQLDatabase:
             kwargs.get("stop_loss"),
             kwargs.get("take_profit"),
             kwargs.get("reasoning"),
-            kwargs.get("indicators", {}),
-            kwargs.get("metadata", {}),
+            json.dumps(kwargs.get("indicators", {})),
+            json.dumps(kwargs.get("metadata", {})),
         )
         return str(result["id"]) if result else None
 
