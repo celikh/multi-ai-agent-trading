@@ -436,36 +436,55 @@ class RiskManagerAgent(BaseAgent):
     async def _get_market_data(self, symbol: str) -> Dict[str, float]:
         """Get current market data and technical indicators"""
         try:
-            # Get latest price
+            from core.config.settings import settings
+
+            # Get latest price (Flux query)
             price_query = f"""
-                SELECT last(close) as price
-                FROM ohlcv
-                WHERE symbol = '{symbol}'
-                AND time > now() - 1h
+            from(bucket: "{settings.influxdb.bucket}")
+                |> range(start: -1h)
+                |> filter(fn: (r) => r["_measurement"] == "ohlcv")
+                |> filter(fn: (r) => r["symbol"] == "{symbol}")
+                |> filter(fn: (r) => r["_field"] == "close")
+                |> last()
             """
             price_result = await self._influx.query(price_query)
-            current_price = price_result[0]["price"] if price_result else 50000.0
+            current_price = (
+                price_result[0]["_value"]
+                if price_result and "_value" in price_result[0]
+                else 50000.0
+            )
 
-            # Get ATR
+            # Get ATR (Flux query)
             atr_query = f"""
-                SELECT last(value) as atr
-                FROM indicators
-                WHERE symbol = '{symbol}'
-                AND indicator = 'atr'
-                AND time > now() - 1h
+            from(bucket: "{settings.influxdb.bucket}")
+                |> range(start: -1h)
+                |> filter(fn: (r) => r["_measurement"] == "indicator")
+                |> filter(fn: (r) => r["symbol"] == "{symbol}")
+                |> filter(fn: (r) => r["name"] == "atr")
+                |> last()
             """
             atr_result = await self._influx.query(atr_query)
-            atr = atr_result[0]["atr"] if atr_result else None
+            atr = (
+                atr_result[0]["_value"]
+                if atr_result and "_value" in atr_result[0]
+                else None
+            )
 
-            # Calculate recent price std
+            # Calculate recent price std (Flux query)
             std_query = f"""
-                SELECT stddev(close) as std
-                FROM ohlcv
-                WHERE symbol = '{symbol}'
-                AND time > now() - 24h
+            from(bucket: "{settings.influxdb.bucket}")
+                |> range(start: -24h)
+                |> filter(fn: (r) => r["_measurement"] == "ohlcv")
+                |> filter(fn: (r) => r["symbol"] == "{symbol}")
+                |> filter(fn: (r) => r["_field"] == "close")
+                |> stddev()
             """
             std_result = await self._influx.query(std_query)
-            price_std = std_result[0]["std"] if std_result else None
+            price_std = (
+                std_result[0]["_value"]
+                if std_result and "_value" in std_result[0]
+                else None
+            )
 
             return {
                 "price": current_price,

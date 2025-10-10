@@ -3,7 +3,7 @@ InfluxDB time-series database for market data storage.
 """
 
 from typing import Dict, List, Optional, Any
-from datetime import datetime, timedelta
+from datetime import datetime
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 from core.config.settings import settings
@@ -151,12 +151,19 @@ class InfluxDBManager:
 
         query = f'''
         from(bucket: "{settings.influxdb.bucket}")
-            |> range(start: {start_time.isoformat()}Z, stop: {end_time.isoformat()}Z)
+            |> range(
+                start: {start_time.isoformat()}Z,
+                stop: {end_time.isoformat()}Z
+            )
             |> filter(fn: (r) => r["_measurement"] == "ohlcv")
             |> filter(fn: (r) => r["symbol"] == "{symbol}")
             |> filter(fn: (r) => r["exchange"] == "{exchange}")
             |> filter(fn: (r) => r["interval"] == "{interval}")
-            |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")
+            |> pivot(
+                rowKey:["_time"],
+                columnKey: ["_field"],
+                valueColumn: "_value"
+            )
         '''
 
         result = self._query_api.query(org=settings.influxdb.org, query=query)
@@ -189,7 +196,10 @@ class InfluxDBManager:
 
         query = f'''
         from(bucket: "{settings.influxdb.bucket}")
-            |> range(start: {start_time.isoformat()}Z, stop: {end_time.isoformat()}Z)
+            |> range(
+                start: {start_time.isoformat()}Z,
+                stop: {end_time.isoformat()}Z
+            )
             |> filter(fn: (r) => r["_measurement"] == "indicator")
             |> filter(fn: (r) => r["symbol"] == "{symbol}")
             |> filter(fn: (r) => r["name"] == "{indicator_name}")
@@ -228,6 +238,28 @@ class InfluxDBManager:
                 return record.get_value()
 
         return None
+
+    async def query(self, flux_query: str) -> List[Dict[str, Any]]:
+        """
+        Execute a Flux query and return results as list of dicts.
+        Wrapper for async compatibility with agents.
+        """
+        if not self._query_api:
+            raise RuntimeError("InfluxDB not connected. Call connect() first.")
+
+        result = self._query_api.query(org=settings.influxdb.org, query=flux_query)
+
+        data = []
+        for table in result:
+            for record in table.records:
+                row = {"_time": record.get_time()}
+                # Add all fields and tags
+                for key, value in record.values.items():
+                    if not key.startswith("_") or key == "_value":
+                        row[key] = value
+                data.append(row)
+
+        return data
 
 
 # Global InfluxDB instance
