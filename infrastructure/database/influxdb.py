@@ -247,23 +247,44 @@ class InfluxDBManager:
         if not self._query_api:
             raise RuntimeError("InfluxDB not connected. Call connect() first.")
 
-        result = self._query_api.query(org=settings.influxdb.org, query=flux_query)
+        try:
+            result = self._query_api.query(
+                org=settings.influxdb.org, query=flux_query
+            )
 
-        data = []
-        for table in result:
-            for record in table.records:
-                timestamp = record.get_time()
-                row = {
-                    "_time": timestamp.isoformat() if timestamp else None,
-                    "_value": record.get_value(),
-                }
-                # Add all fields and tags
-                for key, value in record.values.items():
-                    if not key.startswith("_"):
-                        row[key] = value
-                data.append(row)
+            data = []
+            for table in result:
+                for record in table.records:
+                    timestamp = record.get_time()
+                    value = record.get_value()
 
-        return data
+                    # Debug: Log successful query result structure
+                    logger.debug(
+                        "influx_query_result",
+                        timestamp_type=type(timestamp).__name__,
+                        value_type=type(value).__name__,
+                        has_timestamp=timestamp is not None,
+                    )
+
+                    row = {
+                        "_time": timestamp.isoformat() if timestamp else None,
+                        "_value": value,
+                    }
+                    # Add all fields and tags
+                    for key, value in record.values.items():
+                        if not key.startswith("_"):
+                            row[key] = value
+                    data.append(row)
+
+            return data
+        except Exception as e:
+            logger.error(
+                "influx_query_error",
+                error=str(e),
+                error_type=type(e).__name__,
+                query_preview=flux_query[:100],
+            )
+            raise
 
 
 # Global InfluxDB instance
