@@ -330,6 +330,26 @@ class PositionSizer:
         # Calculate quantity in base currency
         quantity = position_size / current_price
 
+        # Apply exchange minimum lot size constraints
+        # Binance minimum lot sizes (hardcoded for now, should fetch from exchange in production)
+        min_lot_sizes = {
+            "BTC/USDT": 0.00001,
+            "ETH/USDT": 0.0001,
+            "SOL/USDT": 0.001,
+            "BNB/USDT": 0.001,
+        }
+
+        min_quantity = min_lot_sizes.get(symbol, 0.001)  # Default 0.001
+
+        if quantity < min_quantity:
+            # If calculated quantity is below minimum, use minimum
+            quantity = min_quantity
+            # Recalculate position size based on minimum quantity
+            position_size = quantity * current_price
+            # Recalculate risk amount
+            risk_amount = position_size * stop_loss_pct
+            sizing_method += " (min-lot-adjusted)"
+
         # Round to reasonable precision
         quantity = round(quantity, 8)
         position_size = round(position_size, 2)
