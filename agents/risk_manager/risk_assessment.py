@@ -318,6 +318,86 @@ class PortfolioRiskAnalyzer:
 
         return sortino
 
+    def calculate_portfolio_heat(
+        self,
+        positions: List[Dict],
+        account_balance: float,
+    ) -> Dict[str, float]:
+        """
+        Calculate portfolio heat (total risk exposure)
+
+        Portfolio heat = sum of all position risks (entry to stop-loss distance)
+
+        Args:
+            positions: List of open positions with entry_price, stop_loss, size
+            account_balance: Current account balance in USDT
+
+        Returns:
+            Dict with:
+                - total_heat_usd: Total $ at risk across all positions
+                - total_heat_pct: Total risk as % of account balance
+                - per_position_heat: List of individual position risks
+                - max_heat_allowed: Maximum allowed heat (6% of balance)
+                - heat_available: Remaining heat capacity
+        """
+        if not positions or account_balance <= 0:
+            return {
+                "total_heat_usd": 0.0,
+                "total_heat_pct": 0.0,
+                "per_position_heat": [],
+                "max_heat_allowed": account_balance * 0.06,  # 6% max
+                "heat_available": account_balance * 0.06,
+            }
+
+        per_position_heat = []
+        total_heat_usd = 0.0
+
+        for pos in positions:
+            entry_price = pos.get("entry_price", 0)
+            stop_loss = pos.get("stop_loss", 0)
+            position_size_usd = pos.get("size_usd", 0)
+            symbol = pos.get("symbol", "UNKNOWN")
+
+            if entry_price > 0 and stop_loss > 0 and position_size_usd > 0:
+                # Calculate risk percentage (distance from entry to SL)
+                risk_pct = abs((stop_loss - entry_price) / entry_price)
+
+                # Calculate dollar risk for this position
+                position_heat_usd = position_size_usd * risk_pct
+
+                per_position_heat.append({
+                    "symbol": symbol,
+                    "position_size_usd": position_size_usd,
+                    "risk_pct": risk_pct,
+                    "heat_usd": position_heat_usd,
+                })
+
+                total_heat_usd += position_heat_usd
+            else:
+                # Position without stop-loss - assume 5% risk (conservative)
+                position_heat_usd = position_size_usd * 0.05
+                per_position_heat.append({
+                    "symbol": symbol,
+                    "position_size_usd": position_size_usd,
+                    "risk_pct": 0.05,
+                    "heat_usd": position_heat_usd,
+                    "warning": "No stop-loss set"
+                })
+                total_heat_usd += position_heat_usd
+
+        total_heat_pct = (total_heat_usd / account_balance) if account_balance > 0 else 0.0
+        max_heat_allowed = account_balance * 0.06  # 6% maximum portfolio heat
+        heat_available = max(0, max_heat_allowed - total_heat_usd)
+
+        return {
+            "total_heat_usd": total_heat_usd,
+            "total_heat_pct": total_heat_pct,
+            "per_position_heat": per_position_heat,
+            "max_heat_allowed": max_heat_allowed,
+            "heat_available": heat_available,
+            "within_limits": total_heat_usd <= max_heat_allowed,
+        }
+
 
 class TradeValidator:
     """
