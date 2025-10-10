@@ -439,7 +439,7 @@ async def main():
         fusion_strategy="hybrid",  # or "bayesian", "consensus", "time_decay"
         min_signals=2,
         signal_timeout_seconds=300,
-        min_confidence=0.6,
+        min_confidence=0.05,  # DEV-77: Lowered from 0.6 to enable trading for testing
         decision_interval_seconds=30,
     )
 

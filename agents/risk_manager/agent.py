@@ -74,10 +74,11 @@ class RiskManagerAgent(BaseAgent):
         # Risk modules
         # Adaptive max position size for small accounts
         # Small accounts (<$100) need higher position % to meet exchange minimums
+        # DEV-77: Reduced medium account sizing from 30% to 15% for multi-symbol trading
         if account_balance < 100:
             max_position_pct = 0.80  # 80% for small accounts to meet $10 minimum
         elif account_balance < 1000:
-            max_position_pct = 0.30  # 30% for medium accounts
+            max_position_pct = 0.15  # 15% for medium accounts (3 symbols = 45% max)
         else:
             max_position_pct = 0.10  # 10% for larger accounts
 
