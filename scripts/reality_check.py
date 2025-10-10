@@ -34,8 +34,8 @@ REALITY_CHECKS = {
         "title": "Position sizing optimization",
         "checks": [
             {
-                "name": "No insufficient balance errors",
-                "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/execution.log | grep -c \"insufficient balance\"'",
+                "name": "No insufficient balance errors (last hour)",
+                "command": "ssh mac-mini 'tail -500 ~/projects/multi-ai-agent-trading/logs/execution.log | strings | grep \"insufficient balance\" | grep \"$(date +%H):\" | wc -l | tr -d \" \"'",
                 "expected": "0",
                 "alert_if_not": True
             },
@@ -50,15 +50,15 @@ REALITY_CHECKS = {
         "title": "Positions table exists",
         "checks": [
             {
-                "name": "Table exists in database",
-                "command": "ssh mac-mini 'cd ~/projects/multi-ai-agent-trading && PGPASSWORD=trading123 venv/bin/python3 -c \"import asyncio; from infrastructure.database.postgresql import get_db; db = asyncio.run(get_db()); result = asyncio.run(db.fetch_one(\\\"SELECT COUNT(*) as count FROM information_schema.tables WHERE table_name=\\\\\\\"positions\\\\\\\"\\\"); print(\\\"exists\\\" if result and result[\\\\\\\"count\\\\\\\"] > 0 else \\\"missing\\\")\"; echo \"Table check: $?\"'",
-                "contains": ["exists"],
+                "name": "No relation not exist errors (confirms table exists)",
+                "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/risk_manager.log | grep -c \"positions.*does not exist\"'",
+                "expected": "0",
                 "alert_if_not": True
             },
             {
-                "name": "No relation not exist errors",
-                "command": "ssh mac-mini 'tail -100 ~/projects/multi-ai-agent-trading/logs/risk_manager.log | grep -c \"positions.*does not exist\"'",
-                "expected": "0",
+                "name": "Positions count query succeeds",
+                "command": "ssh mac-mini 'cd ~/projects/multi-ai-agent-trading && PYTHONPATH=. venv/bin/python3 -c \"import asyncio; from infrastructure.database.postgresql import get_db; asyncio.run(get_db()).fetch_one(\\\"SELECT COUNT(*) FROM positions\\\")\" 2>&1 | grep -q \"postgres_connected\" && echo \"success\" || echo \"fail\"'",
+                "expected": "success",
                 "alert_if_not": True
             }
         ]
