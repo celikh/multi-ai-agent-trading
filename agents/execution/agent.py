@@ -9,7 +9,7 @@ import asyncio
 import json
 import uuid
 
-from agents.base.agent import BaseAgent
+from agents.base.agent import PeriodicAgent
 from agents.base.protocol import (
     MessageType,
     Order,
@@ -31,7 +31,7 @@ from infrastructure.database.postgresql import get_db, PostgreSQLDatabase
 from core.config.settings import settings
 
 
-class ExecutionAgent(BaseAgent):
+class ExecutionAgent(PeriodicAgent):
     """
     Execution Agent - Order Execution and Position Management
 
@@ -42,12 +42,18 @@ class ExecutionAgent(BaseAgent):
     - Calculate slippage and execution costs
     - Manage positions and P&L tracking
     - Report execution results
+    - Monitor positions periodically (every 10 seconds)
+    - Check SL/TP order triggers
 
     Message Flow:
     Risk Manager → [trade.order] → Execution Agent → Exchange
                                            ↓
                                    [execution.report]
                                    [position.update]
+
+    Periodic Tasks (every 10 seconds):
+    - Update position prices and PnL
+    - Check SL/TP order status
     """
 
     def __init__(
@@ -58,8 +64,14 @@ class ExecutionAgent(BaseAgent):
         api_key: Optional[str] = None,
         api_secret: Optional[str] = None,
         max_slippage_pct: float = 1.0,  # Max 1% slippage
+        monitoring_interval: int = 10,  # Position monitoring interval in seconds
     ):
-        super().__init__(name, agent_type="execution")
+        super().__init__(
+            name=name,
+            agent_type="execution",
+            interval_seconds=monitoring_interval,
+            description="Order execution and position monitoring"
+        )
 
         # Configuration
         self.exchange_id = exchange_id
@@ -104,10 +116,8 @@ class ExecutionAgent(BaseAgent):
         await self.subscribe_topic("trade.order", self._handle_order)
         self.logger.info("execution_agent_setup_complete")
 
-    async def run(self) -> None:
-        """Main agent loop (event-driven, just wait)"""
-        while self._running:
-            await asyncio.sleep(1)
+    # Note: run() method inherited from PeriodicAgent
+    # Periodic execution handled by execute() method
 
     async def cleanup(self) -> None:
         """Cleanup resources"""
@@ -625,6 +635,100 @@ class ExecutionAgent(BaseAgent):
 
         except Exception as e:
             self.logger.error("update_position_error", error=str(e), position_id=getattr(position, 'position_id', 'unknown'))
+
+    async def execute(self) -> None:
+        """
+        Periodic position monitoring task (runs every interval_seconds)
+
+        Tasks:
+        1. Update all open position prices
+        2. Calculate unrealized PnL
+        3. Update database
+        4. Check SL/TP order triggers (DEV-76)
+        """
+        try:
+            # Get all open positions
+            open_positions = self.position_manager.get_all_positions()
+
+            if not open_positions:
+                self.logger.info("no_open_positions_to_monitor")
+                return
+
+            self.logger.info(
+                "monitoring_positions",
+                count=len(open_positions),
+                symbols=[p.symbol for p in open_positions]
+            )
+
+            # Update each position
+            for position in open_positions:
+                try:
+                    # Fetch current market price
+                    current_price = await self._fetch_current_price(position.symbol)
+
+                    if current_price is None:
+                        self.logger.warning(
+                            "failed_to_fetch_price",
+                            symbol=position.symbol,
+                            position_id=position.position_id
+                        )
+                        continue
+
+                    # Update position price in memory
+                    self.position_manager.update_position_price(
+                        position.position_id,
+                        current_price
+                    )
+
+                    # Update database
+                    await self._update_position_in_db(position)
+
+                    self.logger.debug(
+                        "position_updated",
+                        position_id=position.position_id,
+                        symbol=position.symbol,
+                        current_price=current_price,
+                        unrealized_pnl=position.unrealized_pnl
+                    )
+
+                    # Publish position update
+                    position_msg = PositionUpdateMessage(
+                        source_agent=self.name,
+                        symbol=position.symbol,
+                        side=position.side.value,
+                        quantity=position.quantity,
+                        entry_price=position.entry_price,
+                        current_price=current_price,
+                        unrealized_pnl=position.unrealized_pnl,
+                        realized_pnl=position.realized_pnl,
+                        metadata={"position_id": position.position_id},
+                    )
+
+                    await self.publish_message(
+                        "position.update", position_msg, priority=7
+                    )
+
+                except Exception as e:
+                    self.log_error(
+                        e,
+                        {
+                            "position_id": position.position_id,
+                            "symbol": position.symbol,
+                            "operation": "position_monitoring"
+                        }
+                    )
+
+        except Exception as e:
+            self.log_error(e, {"operation": "execute_periodic_monitoring"})
+
+    async def _fetch_current_price(self, symbol: str) -> Optional[float]:
+        """Fetch current market price for symbol"""
+        try:
+            ticker = await self.order_executor.exchange.fetch_ticker(symbol)
+            return ticker.get('last') or ticker.get('close')
+        except Exception as e:
+            self.log_error(e, {"symbol": symbol, "operation": "fetch_current_price"})
+            return None
 
 
 async def main():
