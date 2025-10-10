@@ -252,8 +252,9 @@ class InfluxDBManager:
         data = []
         for table in result:
             for record in table.records:
+                timestamp = record.get_time()
                 row = {
-                    "_time": record.get_time(),
+                    "_time": timestamp.isoformat() if timestamp else None,
                     "_value": record.get_value(),
                 }
                 # Add all fields and tags
