@@ -284,20 +284,26 @@ class ExecutionAgent(PeriodicAgent):
         )
 
         # Place stop-loss and take-profit orders if specified
-        if order.stop_loss:
+        # Get position_id from newly created/updated position
+        positions = self.position_manager.get_positions_by_symbol(execution.symbol)
+        position_id = positions[0].position_id if positions else None
+
+        if order.stop_loss and position_id:
             await self._place_stop_loss(
                 execution.symbol,
                 "sell" if execution.side == "buy" else "buy",
                 execution.filled_quantity,
                 order.stop_loss,
+                position_id,
             )
 
-        if order.take_profit:
+        if order.take_profit and position_id:
             await self._place_take_profit(
                 execution.symbol,
                 "sell" if execution.side == "buy" else "buy",
                 execution.filled_quantity,
                 order.take_profit,
+                position_id,
             )
 
         self.logger.info(
@@ -469,9 +475,9 @@ class ExecutionAgent(PeriodicAgent):
         )
 
     async def _place_stop_loss(
-        self, symbol: str, side: str, quantity: float, stop_price: float
+        self, symbol: str, side: str, quantity: float, stop_price: float, position_id: str
     ):
-        """Place stop-loss order"""
+        """Place stop-loss order and store in database"""
         try:
             execution = await self.order_executor.place_stop_loss_order(
                 symbol=symbol,
@@ -480,11 +486,25 @@ class ExecutionAgent(PeriodicAgent):
                 stop_price=stop_price,
             )
 
+            # Store SL order in orders table
+            await self._store_order_to_db(
+                order_id=execution.order_id,
+                symbol=symbol,
+                side=side,
+                order_type="STOP_LOSS",
+                quantity=quantity,
+                price=stop_price,
+                status="PENDING",
+                position_id=position_id,
+                exchange_order_id=execution.order_id,
+            )
+
             self.logger.info(
                 "stop_loss_placed",
                 symbol=symbol,
                 stop_price=stop_price,
                 order_id=execution.order_id,
+                position_id=position_id,
             )
         except Exception as e:
             self.logger.error(
@@ -492,9 +512,9 @@ class ExecutionAgent(PeriodicAgent):
             )
 
     async def _place_take_profit(
-        self, symbol: str, side: str, quantity: float, tp_price: float
+        self, symbol: str, side: str, quantity: float, tp_price: float, position_id: str
     ):
-        """Place take-profit order"""
+        """Place take-profit order and store in database"""
         try:
             execution = await self.order_executor.place_take_profit_order(
                 symbol=symbol,
@@ -503,11 +523,25 @@ class ExecutionAgent(PeriodicAgent):
                 take_profit_price=tp_price,
             )
 
+            # Store TP order in orders table
+            await self._store_order_to_db(
+                order_id=execution.order_id,
+                symbol=symbol,
+                side=side,
+                order_type="TAKE_PROFIT",
+                quantity=quantity,
+                price=tp_price,
+                status="PENDING",
+                position_id=position_id,
+                exchange_order_id=execution.order_id,
+            )
+
             self.logger.info(
                 "take_profit_placed",
                 symbol=symbol,
                 tp_price=tp_price,
                 order_id=execution.order_id,
+                position_id=position_id,
             )
         except Exception as e:
             self.logger.error(
@@ -551,6 +585,65 @@ class ExecutionAgent(PeriodicAgent):
 
         except Exception as e:
             self.logger.error("store_execution_error", error=str(e))
+
+    async def _store_order_to_db(
+        self,
+        order_id: str,
+        symbol: str,
+        side: str,
+        order_type: str,
+        quantity: float,
+        price: float,
+        status: str,
+        position_id: str = None,
+        exchange_order_id: str = None,
+        filled_price: float = None,
+        filled_quantity: float = None,
+        error_message: str = None,
+    ):
+        """Store order in orders table"""
+        try:
+            import json
+
+            query = """
+                INSERT INTO orders (
+                    order_id, symbol, side, order_type, quantity, price, status,
+                    created_at, exchange_order_id, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """
+
+            metadata = {"position_id": position_id} if position_id else {}
+            if filled_price is not None:
+                metadata["filled_price"] = filled_price
+            if filled_quantity is not None:
+                metadata["filled_quantity"] = filled_quantity
+            if error_message:
+                metadata["error_message"] = error_message
+
+            await self._db.execute(
+                query,
+                order_id,
+                symbol,
+                side.upper(),
+                order_type,
+                quantity,
+                price,
+                status,
+                datetime.utcnow(),
+                exchange_order_id,
+                json.dumps(metadata),
+            )
+
+            self.logger.debug(
+                "order_stored_to_db",
+                order_id=order_id,
+                type=order_type,
+                position_id=position_id,
+            )
+
+        except Exception as e:
+            self.logger.error("store_order_error", error=str(e), order_id=order_id)
 
     async def _store_position_to_db(self, position: Any):
         """Store position in database"""
@@ -809,8 +902,8 @@ class ExecutionAgent(PeriodicAgent):
                 SELECT order_id, order_type, price, quantity, side, status, metadata
                 FROM orders
                 WHERE symbol = $1
-                  AND status IN ('open', 'pending')
-                  AND order_type IN ('stop_loss', 'take_profit')
+                  AND status IN ('OPEN', 'PENDING')
+                  AND order_type IN ('STOP_LOSS', 'TAKE_PROFIT')
                   AND metadata->>'position_id' = $2
             """
 
@@ -834,15 +927,16 @@ class ExecutionAgent(PeriodicAgent):
 
                 triggered = False
 
-                # Check SL trigger conditions
-                if order_type == 'stop_loss':
+                # Check SL trigger conditions (normalize to uppercase for comparison)
+                order_type_upper = order_type.upper()
+                if order_type_upper == 'STOP_LOSS':
                     if position.side == PositionSide.LONG and current_price <= trigger_price:
                         triggered = True
                     elif position.side == PositionSide.SHORT and current_price >= trigger_price:
                         triggered = True
 
                 # Check TP trigger conditions
-                elif order_type == 'take_profit':
+                elif order_type_upper == 'TAKE_PROFIT':
                     if position.side == PositionSide.LONG and current_price >= trigger_price:
                         triggered = True
                     elif position.side == PositionSide.SHORT and current_price <= trigger_price:
@@ -905,12 +999,10 @@ class ExecutionAgent(PeriodicAgent):
             )
 
             # Execute market order to close position
-            exchange_order = await self.order_executor.execute_order(
+            exchange_order = await self.order_executor.place_market_order(
                 symbol=position.symbol,
                 side=close_side,
-                order_type="market",
                 quantity=position.quantity,
-                reduce_only=True  # Close only, don't open new position
             )
 
             if exchange_order:
@@ -918,7 +1010,7 @@ class ExecutionAgent(PeriodicAgent):
                 await self._db.execute(
                     """
                     UPDATE orders
-                    SET status = 'filled',
+                    SET status = 'FILLED',
                         filled_at = NOW(),
                         filled_price = $1,
                         metadata = metadata || jsonb_build_object('triggered_at', NOW())
@@ -935,15 +1027,15 @@ class ExecutionAgent(PeriodicAgent):
                 await self._db.execute(
                     """
                     UPDATE positions
-                    SET status = 'closed',
-                        exit_price = $1,
-                        exit_time = NOW(),
+                    SET status = 'CLOSED',
+                        current_price = $1,
+                        closed_at = NOW(),
                         realized_pnl = $2
-                    WHERE position_id = $3
+                    WHERE id = (SELECT id FROM positions WHERE symbol = $3 AND status = 'OPEN' LIMIT 1)
                     """,
                     current_price,
                     position.realized_pnl,
-                    position.position_id
+                    position.symbol
                 )
 
                 self.logger.info(
