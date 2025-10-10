@@ -252,10 +252,13 @@ class InfluxDBManager:
         data = []
         for table in result:
             for record in table.records:
-                row = {"_time": record.get_time()}
+                row = {
+                    "_time": record.get_time(),
+                    "_value": record.get_value(),
+                }
                 # Add all fields and tags
                 for key, value in record.values.items():
-                    if not key.startswith("_") or key == "_value":
+                    if not key.startswith("_"):
                         row[key] = value
                 data.append(row)
 
