@@ -250,7 +250,7 @@ class ExecutionAgent(BaseAgent):
 
         # Publish execution report
         exec_report_msg = ExecReportMessage(
-            source_agent=self.agent_name,
+            source_agent=self.name,
             order_id=execution.order_id,
             exchange=order.exchange,
             symbol=execution.symbol,
@@ -308,6 +308,39 @@ class ExecutionAgent(BaseAgent):
             symbol=execution.symbol,
             error=execution.metadata.get("error"),
         )
+
+        # Publish execution report for rejected order to release reserved balance
+        try:
+            exec_report_msg = ExecReportMessage(
+                source_agent=self.name,
+                order_id=execution.order_id,
+                exchange=order.exchange,
+                symbol=execution.symbol,
+                side=execution.side.upper() if isinstance(execution.side, str) else execution.side,
+                status="REJECTED",
+                filled_quantity=0.0,
+                average_price=0.0,
+                total_value=0.0,
+                fee=0.0,
+                fee_currency="USDT",
+                execution_time=datetime.utcnow(),
+            )
+
+            await self.publish_message(
+                "execution.report", exec_report_msg, priority=8
+            )
+
+            self.logger.info(
+                "execution_report_published",
+                order_id=execution.order_id,
+                status="REJECTED",
+            )
+        except Exception as e:
+            self.logger.error(
+                "failed_to_publish_rejection_report",
+                order_id=execution.order_id,
+                error=str(e),
+            )
 
         # Remove from pending
         order_id = order.correlation_id or str(uuid.uuid4())
@@ -400,6 +433,7 @@ class ExecutionAgent(BaseAgent):
 
         # Publish position update
         position_msg = PositionUpdateMessage(
+            source_agent=self.name,
             symbol=symbol,
             side=position.side.value,
             quantity=position.quantity,

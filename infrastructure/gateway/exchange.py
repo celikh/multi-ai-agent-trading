@@ -46,9 +46,11 @@ class ExchangeGateway(LoggerMixin):
                 "apiKey": credentials.get("apiKey"),
                 "secret": credentials.get("secret"),
                 "enableRateLimit": True,
+                "timeout": 30000,  # 30 seconds (increased from default 10s)
                 "options": {
                     "defaultType": "spot",  # spot or future
                     "adjustForTimeDifference": True,
+                    "recvWindow": 10000,  # Binance recvWindow for clock sync
                 },
             })
 

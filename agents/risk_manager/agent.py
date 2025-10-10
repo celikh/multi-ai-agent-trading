@@ -421,20 +421,28 @@ class RiskManagerAgent(BaseAgent):
             if not order_id:
                 return
 
-            # Release reserved balance when order is filled
+            # Release reserved balance for all execution reports
             async with self.balance_lock:
                 if order_id in self.reserved_balance:
                     reserved_amount = self.reserved_balance.pop(order_id)
 
-                    # Update actual balance (deduct the used amount)
-                    self.account_balance -= reserved_amount
+                    # Update actual balance based on order status
+                    if status == 'FILLED':
+                        # Deduct the used amount for filled orders
+                        self.account_balance -= reserved_amount
+                        event_type = "balance_released_after_fill"
+                    else:
+                        # Return the reserved amount for rejected/cancelled orders
+                        # No change to account_balance - just release the reservation
+                        event_type = "balance_released_after_rejection"
 
                     self.logger.info(
-                        "balance_released_after_execution",
+                        event_type,
                         order_id=order_id,
                         status=status,
                         released_amount=reserved_amount,
                         remaining_balance=self.account_balance,
+                        available_balance=self.account_balance - sum(self.reserved_balance.values()),
                         total_reserved=sum(self.reserved_balance.values()),
                     )
         except Exception as e:

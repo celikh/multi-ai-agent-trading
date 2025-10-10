@@ -5,7 +5,7 @@ Collects real-time market data from exchanges via REST and WebSocket.
 
 import asyncio
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from agents.base.agent import PeriodicAgent
 from agents.base.protocol import MarketDataMessage, MessageType
 from infrastructure.gateway.exchange import get_exchange, ExchangeGateway
@@ -77,6 +77,7 @@ class DataCollectionAgent(PeriodicAgent):
 
     async def execute(self) -> None:
         """Periodic REST fallback (runs every interval)"""
+        self.log_event("execute_started", symbols=self.symbols)
         for symbol in self.symbols:
             try:
                 await self._fetch_rest_data(symbol)
@@ -155,6 +156,8 @@ class DataCollectionAgent(PeriodicAgent):
     async def _fetch_rest_data(self, symbol: str) -> None:
         """Fetch data via REST (fallback)"""
         try:
+            self.logger.info("fetching_rest_data", symbol=symbol)
+
             # Fetch OHLCV
             ohlcv = await self._exchange.fetch_ohlcv(
                 symbol,
@@ -162,19 +165,26 @@ class DataCollectionAgent(PeriodicAgent):
                 limit=1,
             )
 
+            self.logger.info("ohlcv_fetched", symbol=symbol, count=len(ohlcv) if ohlcv else 0)
+
             if ohlcv and len(ohlcv) > 0:
                 latest = ohlcv[-1]
-                await self._store_ohlcv(symbol, latest)
+                self._store_ohlcv(symbol, latest)  # Removed await - sync method
+                self.logger.info("ohlcv_stored", symbol=symbol)
 
             # Fetch ticker
             ticker = await self._exchange.fetch_ticker(symbol)
-            await self._store_ticker(symbol, ticker)
+            self.logger.info("ticker_fetched", symbol=symbol, price=ticker.get("last"))
+            self._store_ticker(symbol, ticker)  # Removed await - sync method
+            self.logger.info("ticker_stored", symbol=symbol)
 
             # Fetch order book
             orderbook = await self._exchange.fetch_order_book(symbol, limit=10)
-            await self._store_orderbook(symbol, orderbook)
+            self.logger.info("orderbook_fetched", symbol=symbol)
+            self._store_orderbook(symbol, orderbook)  # Removed await - sync method
+            self.logger.info("orderbook_stored", symbol=symbol)
 
-            self.logger.debug(
+            self.logger.info(
                 "rest_data_fetched",
                 symbol=symbol,
                 exchange=self.exchange_name,
@@ -208,7 +218,7 @@ class DataCollectionAgent(PeriodicAgent):
         self._influx.write_ohlcv(
             symbol=symbol,
             exchange=self.exchange_name,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             open_price=price,
             high=price,
             low=price,
@@ -232,7 +242,7 @@ class DataCollectionAgent(PeriodicAgent):
         self._influx.write_orderbook(
             symbol=symbol,
             exchange=self.exchange_name,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
             bid_price=bid_price,
             bid_volume=bid_volume,
             ask_price=ask_price,
@@ -272,7 +282,7 @@ class DataCollectionAgent(PeriodicAgent):
                 "low": candle[3],
                 "close": candle[4],
                 "volume": candle[5],
-                "interval": self.interval,
+                "interval": self.timeframe,  # Fixed: was self.interval
             },
         )
 
