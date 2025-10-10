@@ -181,7 +181,7 @@ class DataCollectionAgent(PeriodicAgent):
             # Fetch order book
             orderbook = await self._exchange.fetch_order_book(symbol, limit=10)
             self.logger.info("orderbook_fetched", symbol=symbol)
-            self._store_orderbook(symbol, orderbook)  # Removed await - sync method
+            await self._store_orderbook(symbol, orderbook)
             self.logger.info("orderbook_stored", symbol=symbol)
 
             self.logger.info(
