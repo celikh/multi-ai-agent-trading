@@ -278,11 +278,13 @@ class InfluxDBManager:
 
             return data
         except Exception as e:
+            import traceback
             logger.error(
                 "influx_query_error",
                 error=str(e),
                 error_type=type(e).__name__,
                 query_preview=flux_query[:100],
+                traceback=traceback.format_exc(),
             )
             raise
 
