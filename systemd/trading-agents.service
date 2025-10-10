@@ -1,0 +1,18 @@
+[Unit]
+Description=Multi-Agent Trading System - All Agents
+After=network.target docker.service trading-api.service
+Requires=docker.service trading-api.service
+
+[Service]
+Type=forking
+User=hasancelik
+WorkingDirectory=/Users/hasancelik/projects/multi-ai-agent-trading
+ExecStart=/Users/hasancelik/projects/multi-ai-agent-trading/start_all_agents.sh
+ExecStop=/usr/bin/pkill -f 'agents\\.'
+Restart=always
+RestartSec=15
+StandardOutput=append:/Users/hasancelik/projects/multi-ai-agent-trading/logs/agents-service.log
+StandardError=append:/Users/hasancelik/projects/multi-ai-agent-trading/logs/agents-service.log
+
+[Install]
+WantedBy=multi-user.target

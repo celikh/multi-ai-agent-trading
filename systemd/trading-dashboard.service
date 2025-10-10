@@ -1,0 +1,19 @@
+[Unit]
+Description=Multi-Agent Trading System Dashboard
+After=network.target trading-api.service
+Requires=trading-api.service
+
+[Service]
+Type=simple
+User=hasancelik
+WorkingDirectory=/Users/hasancelik/projects/multi-ai-agent-trading/trading-dashboard
+Environment="PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="NODE_ENV=production"
+ExecStart=/opt/homebrew/bin/npm run start -- -p 3001
+Restart=always
+RestartSec=10
+StandardOutput=append:/Users/hasancelik/projects/multi-ai-agent-trading/logs/dashboard.log
+StandardError=append:/Users/hasancelik/projects/multi-ai-agent-trading/logs/dashboard.log
+
+[Install]
+WantedBy=multi-user.target

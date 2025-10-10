@@ -1,0 +1,247 @@
+version: '3.8'
+
+services:
+  # Infrastructure
+  postgresql:
+    image: timescale/timescaledb:latest-pg14
+    container_name: trading_postgres
+    environment:
+      POSTGRES_DB: trading_system
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading123
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.11-management
+    container_name: trading_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - ./rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro
+      - ./advanced.config:/etc/rabbitmq/advanced.config:ro
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: trading_influxdb
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: trading
+      DOCKER_INFLUXDB_INIT_PASSWORD: trading123
+      DOCKER_INFLUXDB_INIT_ORG: trading_org
+      DOCKER_INFLUXDB_INIT_BUCKET: market_data
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: trading_token_123
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    networks:
+      - trading_network
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Monitoring
+  grafana:
+    image: grafana/grafana:latest
+    container_name: trading_grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_INSTALL_PLUGINS: grafana-clock-panel
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    networks:
+      - trading_network
+    depends_on:
+      - influxdb
+      - postgresql
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: trading_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - trading_network
+
+  # Trading Agents
+  data_collection:
+    build:
+      context: ./agents/data_collection
+      dockerfile: Dockerfile
+    container_name: agent_data_collection
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading123
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=trading
+      - RABBITMQ_PASSWORD=trading123
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=trading_token_123
+      - INFLUXDB_ORG=trading_org
+      - INFLUXDB_BUCKET=market_data
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  technical_analysis:
+    build:
+      context: ./agents/technical_analysis
+      dockerfile: Dockerfile
+    container_name: agent_technical_analysis
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading123
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=trading
+      - RABBITMQ_PASSWORD=trading123
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=trading_token_123
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      data_collection:
+        condition: service_started
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  strategy:
+    build:
+      context: ./agents/strategy
+      dockerfile: Dockerfile
+    container_name: agent_strategy
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading123
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=trading
+      - RABBITMQ_PASSWORD=trading123
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      technical_analysis:
+        condition: service_started
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  risk_manager:
+    build:
+      context: ./agents/risk_manager
+      dockerfile: Dockerfile
+    container_name: agent_risk_manager
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading123
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=trading
+      - RABBITMQ_PASSWORD=trading123
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      strategy:
+        condition: service_started
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+  execution:
+    build:
+      context: ./agents/execution
+      dockerfile: Dockerfile
+    container_name: agent_execution
+    environment:
+      - POSTGRES_HOST=postgresql
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=trading_system
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading123
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=trading
+      - RABBITMQ_PASSWORD=trading123
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - EXCHANGE_TESTNET=true
+    depends_on:
+      postgresql:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      risk_manager:
+        condition: service_started
+    networks:
+      - trading_network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  influxdb_data:
+  grafana_data:
+  prometheus_data:
+
+networks:
+  trading_network:
+    driver: bridge

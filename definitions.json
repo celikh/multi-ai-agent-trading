@@ -1,0 +1,30 @@
+{
+  "rabbit_version": "3.11.28",
+  "users": [
+    {
+      "name": "trading",
+      "password_hash": "XCMQbrguUx9toGOs/IYq9M0OwRf1EX12DeOK/WEUSM61ToeU",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"]
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/"
+    }
+  ],
+  "permissions": [
+    {
+      "user": "trading",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "parameters": [],
+  "policies": [],
+  "queues": [],
+  "exchanges": [],
+  "bindings": []
+}
