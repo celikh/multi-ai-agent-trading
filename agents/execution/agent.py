@@ -27,6 +27,7 @@ from agents.execution.position_manager import (
     PositionManager,
     PositionSide,
     Position,
+    PositionStatus,
 )
 from infrastructure.database.postgresql import get_db, PostgreSQLDatabase
 from core.config.settings import settings
@@ -103,6 +104,9 @@ class ExecutionAgent(PeriodicAgent):
 
         # Connect to PostgreSQL
         self._db = await get_db()
+
+        # Load open positions from database (position persistence after restart)
+        await self._load_open_positions()
 
         self.logger.info(
             "execution_agent_initialized",
@@ -588,6 +592,63 @@ class ExecutionAgent(PeriodicAgent):
 
         except Exception as e:
             self.logger.error("store_position_error", error=str(e), position_id=getattr(position, 'position_id', 'unknown'))
+
+    async def _load_open_positions(self) -> None:
+        """Load open positions from database on startup"""
+        try:
+            import json
+
+            query = """
+                SELECT symbol, side, quantity, entry_price, stop_loss, take_profit,
+                       current_price, unrealized_pnl, realized_pnl, opened_at, metadata
+                FROM positions
+                WHERE status = 'OPEN' AND exchange = $1
+            """
+
+            rows = await self._db.fetch_all(query, self.exchange_id)
+
+            loaded_count = 0
+            for row in rows:
+                # Parse metadata
+                metadata = {}
+                if row['metadata']:
+                    metadata = json.loads(row['metadata']) if isinstance(row['metadata'], str) else row['metadata']
+
+                # Create Position object with all required fields
+                position = Position(
+                    position_id=f"{row['symbol']}_{row['side']}_{row['opened_at'].timestamp()}",
+                    symbol=row['symbol'],
+                    side=PositionSide(row['side'].lower()),
+                    entry_price=float(row['entry_price']),
+                    current_price=float(row['current_price']) if row['current_price'] else float(row['entry_price']),
+                    quantity=float(row['quantity']),
+                    initial_quantity=float(row['quantity']),
+                    unrealized_pnl=float(row['unrealized_pnl']) if row['unrealized_pnl'] else 0.0,
+                    unrealized_pnl_pct=0.0,  # Will be recalculated on next monitoring cycle
+                    realized_pnl=float(row['realized_pnl']) if row['realized_pnl'] else 0.0,
+                    total_pnl=0.0,  # Will be recalculated on next monitoring cycle
+                    stop_loss=float(row['stop_loss']) if row['stop_loss'] else None,
+                    take_profit=float(row['take_profit']) if row['take_profit'] else None,
+                    entry_time=row['opened_at'],
+                    status=PositionStatus.OPEN,
+                    metadata=metadata,
+                )
+
+                # Add to PositionManager
+                self.position_manager.positions[position.position_id] = position
+                loaded_count += 1
+
+            if loaded_count > 0:
+                self.logger.info(
+                    "positions_loaded_from_db",
+                    count=loaded_count,
+                    symbols=[p.symbol for p in self.position_manager.get_all_positions()]
+                )
+            else:
+                self.logger.info("no_open_positions_in_db")
+
+        except Exception as e:
+            self.log_error(e, {"operation": "load_open_positions"})
 
     async def _update_position_in_db(self, position: Any):
         """Update position in database"""
