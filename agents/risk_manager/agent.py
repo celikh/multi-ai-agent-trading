@@ -202,11 +202,23 @@ class RiskManagerAgent(BaseAgent):
                 intent_id=intent_id,
             )
 
-            # Use expected_price from TradeIntent (more reliable than InfluxDB query)
-            # InfluxDB query() method not working currently
-            current_price = message.expected_price
+            # Get market data from InfluxDB (price, ATR, volatility)
+            market_data = await self._get_market_data(symbol)
+            current_price = market_data.get("price")
+            atr = market_data.get("atr")
+            price_std = market_data.get("std")
 
-            # Fallback prices if expected_price is 0 or None (temporary fix)
+            # Fallback to expected_price from TradeIntent if InfluxDB fails
+            if not current_price or current_price == 0.0:
+                current_price = message.expected_price
+                if current_price and current_price > 0:
+                    self.logger.debug(
+                        "using_expected_price",
+                        symbol=symbol,
+                        price=current_price
+                    )
+
+            # Last resort: hardcoded fallback prices
             if not current_price or current_price == 0.0:
                 fallback_prices = {
                     "BTC/USDT": 50000.0,
@@ -219,11 +231,6 @@ class RiskManagerAgent(BaseAgent):
                     symbol=symbol,
                     fallback_price=current_price
                 )
-
-            # Get market data for ATR and std (best effort)
-            market_data = await self._get_market_data(symbol)
-            atr = market_data.get("atr")
-            price_std = market_data.get("std")
 
             # Calculate stop-loss and take-profit
             stop_levels = self.stop_loss_manager.calculate_stops(
