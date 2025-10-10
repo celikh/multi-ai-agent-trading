@@ -33,7 +33,7 @@ class DataCollectionAgent(PeriodicAgent):
         super().__init__(
             name="data_collector",
             agent_type="DATA_COLLECTION",
-            interval_seconds=60,  # REST fallback interval
+            interval_seconds=30,  # REST polling interval (optimized from 60s)
             description="Collects real-time market data from exchanges",
         )
 
@@ -60,18 +60,19 @@ class DataCollectionAgent(PeriodicAgent):
         )
 
     async def run(self) -> None:
-        """Start WebSocket streams and REST fallback"""
-        # Start WebSocket streams for each symbol
-        for symbol in self.symbols:
-            task = self.create_task(self._stream_ticker(symbol))
-            self._ws_tasks.append(task)
+        """Start REST-only mode (WebSocket disabled due to connection issues)"""
+        # DISABLED: WebSocket streams (causing data pipeline failure)
+        # TODO: Re-enable after implementing proper health monitoring (DEV-71 M2)
+        # for symbol in self.symbols:
+        #     task = self.create_task(self._stream_ticker(symbol))
+        #     self._ws_tasks.append(task)
+        #     task = self.create_task(self._stream_ohlcv(symbol))
+        #     self._ws_tasks.append(task)
+        # self.log_event("websocket_streams_started", symbols=self.symbols)
 
-            task = self.create_task(self._stream_ohlcv(symbol))
-            self._ws_tasks.append(task)
+        self.log_event("rest_mode_enabled", symbols=self.symbols, interval=30)
 
-        self.log_event("websocket_streams_started", symbols=self.symbols)
-
-        # Call parent's periodic run (REST fallback)
+        # Call parent's periodic run (REST polling every 30s)
         await super().run()
 
     async def execute(self) -> None:
