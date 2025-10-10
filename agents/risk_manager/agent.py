@@ -29,7 +29,7 @@ from agents.risk_manager.stop_loss_placement import (
     StopLossMethod,
 )
 from infrastructure.database.postgresql import get_db, PostgreSQLDatabase
-from infrastructure.database.influxdb import InfluxDBClient
+from infrastructure.database.influxdb import get_influx, InfluxDBManager
 from core.config.settings import settings
 
 
@@ -123,12 +123,7 @@ class RiskManagerAgent(BaseAgent):
         self._db = await get_db()
 
         # Connect to InfluxDB
-        self._influx = InfluxDBClient(
-            url=settings.influxdb.url,
-            token=settings.influxdb.token,
-            org=settings.influxdb.org,
-            bucket=settings.influxdb.bucket,
-        )
+        self._influx = get_influx()
 
         # Load active positions and portfolio state
         await self._load_portfolio_state()
