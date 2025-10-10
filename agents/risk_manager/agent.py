@@ -115,6 +115,10 @@ class RiskManagerAgent(BaseAgent):
         self.current_portfolio_risk: float = 0.0
         self.returns_history: Dict[str, List[float]] = {}
 
+        # Balance locking for concurrent order approval
+        self.balance_lock = asyncio.Lock()
+        self.reserved_balance: Dict[str, float] = {}  # order_id -> reserved amount
+
     async def initialize(self) -> None:
         """Initialize agent resources"""
         await super().initialize()
@@ -143,6 +147,8 @@ class RiskManagerAgent(BaseAgent):
         await self.subscribe_topic("trade.intent", self._handle_trade_intent)
         # Subscribe to position updates
         await self.subscribe_topic("position.update", self._handle_position_update)
+        # Subscribe to order status updates to release reserved balance
+        await self.subscribe_topic("order.status", self._handle_order_status)
         self.logger.info("risk_manager_setup_complete")
 
     async def run(self) -> None:
@@ -265,63 +271,92 @@ class RiskManagerAgent(BaseAgent):
 
             # Log decision
             if risk_assessment.approved:
-                # Additional balance and asset checks before order execution
-                can_execute, execution_reason = await self._can_execute_order(
-                    symbol=symbol,
-                    side=side,
-                    quantity=position_size.quantity,
-                    size_usd=position_size.size_usd,
-                )
+                # CRITICAL SECTION: Lock balance to prevent race conditions
+                async with self.balance_lock:
+                    # Calculate available balance (total - reserved)
+                    total_reserved = sum(self.reserved_balance.values())
+                    available_balance = self.account_balance - total_reserved
 
-                if not can_execute:
-                    self.logger.warning(
-                        "order_execution_blocked",
+                    # Check if we have enough available balance
+                    if available_balance < position_size.size_usd:
+                        self.logger.warning(
+                            "insufficient_available_balance",
+                            symbol=symbol,
+                            required=position_size.size_usd,
+                            available=available_balance,
+                            total_balance=self.account_balance,
+                            reserved=total_reserved,
+                        )
+                        return
+
+                    # Additional balance and asset checks before order execution
+                    can_execute, execution_reason = await self._can_execute_order(
                         symbol=symbol,
                         side=side,
-                        reason=execution_reason,
+                        quantity=position_size.quantity,
                         size_usd=position_size.size_usd,
                     )
-                    return
 
-                self.logger.info(
-                    "trade_approved",
-                    symbol=symbol,
-                    side=side,
-                    quantity=position_size.quantity,
-                    size_usd=position_size.size_usd,
-                    risk_amount=position_size.risk_amount,
-                    stop_loss=stop_levels.stop_loss,
-                    take_profit=stop_levels.take_profit,
-                    risk_score=risk_assessment.risk_score,
-                )
+                    if not can_execute:
+                        self.logger.warning(
+                            "order_execution_blocked",
+                            symbol=symbol,
+                            side=side,
+                            reason=execution_reason,
+                            size_usd=position_size.size_usd,
+                        )
+                        return
 
-                # Create and publish order
-                order = await self._create_order(
-                    trade_intent=message,
-                    position_size=position_size,
-                    stop_levels=stop_levels,
-                )
+                    # Reserve balance immediately
+                    order_id = str(uuid.uuid4())
+                    self.reserved_balance[order_id] = position_size.size_usd
 
-                self.logger.info(
-                    "order_created",
-                    symbol=symbol,
-                    side=order.side.value,
-                    quantity=order.quantity,
-                    order_type=order.order_type.value,
-                )
+                    self.logger.info(
+                        "trade_approved",
+                        symbol=symbol,
+                        side=side,
+                        quantity=position_size.quantity,
+                        size_usd=position_size.size_usd,
+                        risk_amount=position_size.risk_amount,
+                        stop_loss=stop_levels.stop_loss,
+                        take_profit=stop_levels.take_profit,
+                        risk_score=risk_assessment.risk_score,
+                        order_id=order_id,
+                        reserved_balance=position_size.size_usd,
+                    )
 
-                await self.publish_message("trade.order", order, priority=9)
+                    # Create and publish order
+                    order = await self._create_order(
+                        trade_intent=message,
+                        position_size=position_size,
+                        stop_levels=stop_levels,
+                    )
 
-                self.logger.info(
-                    "order_published",
-                    symbol=symbol,
-                    order_id=order.correlation_id or "none",
-                )
+                    # Update order with generated order_id for tracking
+                    if not order.correlation_id:
+                        order.correlation_id = order_id
 
-                # Update portfolio risk
-                self.current_portfolio_risk = (
-                    risk_assessment.portfolio_risk_after
-                )
+                    self.logger.info(
+                        "order_created",
+                        symbol=symbol,
+                        side=order.side.value,
+                        quantity=order.quantity,
+                        order_type=order.order_type.value,
+                        order_id=order.correlation_id,
+                    )
+
+                    await self.publish_message("trade.order", order, priority=9)
+
+                    self.logger.info(
+                        "order_published",
+                        symbol=symbol,
+                        order_id=order.correlation_id or "none",
+                    )
+
+                    # Update portfolio risk
+                    self.current_portfolio_risk = (
+                        risk_assessment.portfolio_risk_after
+                    )
 
             else:
                 self.logger.warning(
@@ -367,6 +402,36 @@ class RiskManagerAgent(BaseAgent):
             active_positions=len(self.active_positions),
             portfolio_risk=self.current_portfolio_risk,
         )
+
+    async def _handle_order_status(self, message: Any) -> None:
+        """Handle order status updates to release reserved balance"""
+        try:
+            order_id = getattr(message, 'correlation_id', None) or getattr(message, 'order_id', None)
+            status = getattr(message, 'status', None)
+
+            if not order_id or not status:
+                return
+
+            # Release reserved balance when order is filled or cancelled
+            if status in ['FILLED', 'CANCELLED', 'REJECTED', 'FAILED']:
+                async with self.balance_lock:
+                    if order_id in self.reserved_balance:
+                        reserved_amount = self.reserved_balance.pop(order_id)
+
+                        # For filled orders, update actual balance
+                        if status == 'FILLED':
+                            self.account_balance -= reserved_amount
+
+                        self.logger.info(
+                            "balance_reservation_released",
+                            order_id=order_id,
+                            status=status,
+                            released_amount=reserved_amount,
+                            remaining_balance=self.account_balance,
+                            total_reserved=sum(self.reserved_balance.values()),
+                        )
+        except Exception as e:
+            self.log_error(e, {"handler": "order_status"})
 
     async def _get_market_data(self, symbol: str) -> Dict[str, float]:
         """Get current market data and technical indicators"""
