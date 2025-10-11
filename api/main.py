@@ -3,12 +3,13 @@ FastAPI Backend for Trading Dashboard
 Provides real-time system status, trades, and metrics
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import numpy as np
 import os
 from dotenv import load_dotenv
 import psutil
@@ -25,7 +26,12 @@ app = FastAPI(title="Trading System API", version="1.0.0")
 # CORS configuration for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://192.168.1.150:3000", "http://192.168.1.150:3001"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://192.168.1.150:3000",
+        "http://192.168.1.150:3001"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -93,13 +99,73 @@ class AccountBalance(BaseModel):
 
 
 class ActivePosition(BaseModel):
+    position_id: str
     symbol: str
     side: str
     size: float
     entryPrice: float
     currentPrice: float
     unrealizedPnl: float
+    unrealizedPnlPercent: float
     marketType: str  # 'spot' or 'futures'
+    # StonkJournal enhancements
+    stopLoss: Optional[float] = None
+    takeProfit: Optional[float] = None
+    strategyTag: Optional[str] = None  # 'swing' | 'scalp' | 'position'
+    openedAt: str = ""
+    holdDuration: Optional[str] = None
+    reasoning: Optional[str] = None
+    executionQuality: Optional[float] = None
+
+
+class DashboardMetrics(BaseModel):
+    totalEquity: float
+    totalPnl: float
+    totalPnlPercent: float
+    winRate: float
+    totalTrades: int
+    winningTrades: int
+    losingTrades: int
+    openPositions: int
+    sharpeRatio: Optional[float] = None
+    maxDrawdown: Optional[float] = None
+    profitFactor: Optional[float] = None
+    averageWin: Optional[float] = None
+    averageLoss: Optional[float] = None
+
+
+class EquityDataPoint(BaseModel):
+    timestamp: str
+    equity: float
+    drawdown: float
+    displayTime: str
+
+
+class StrategyStats(BaseModel):
+    strategy: str
+    totalTrades: int
+    winRate: float
+    totalPnl: float
+    avgWin: float
+    avgLoss: float
+    sharpeRatio: float
+    maxDrawdown: float
+    profitFactor: float
+
+
+class BenchmarkDataPoint(BaseModel):
+    timestamp: str
+    portfolioReturn: float
+    btcReturn: float
+    ethReturn: float
+    displayTime: str
+
+
+class BenchmarkMetrics(BaseModel):
+    data: List[BenchmarkDataPoint]
+    portfolioAlpha: float
+    portfolioBeta: float
+    correlation: Dict[str, float]
 
 
 @contextmanager
@@ -129,7 +195,8 @@ async def get_agent_process_status(agent_name: str) -> Dict[str, Any]:
             text=True
         )
 
-        # Look for agent process with module format: -m agents.data_collection.agent
+        # Look for agent process with module format
+        # -m agents.data_collection.agent
         agent_module = f"agents.{agent_name.lower().replace(' ', '_')}.agent"
         for line in result.stdout.split('\n'):
             if agent_module in line and 'python' in line:
@@ -152,13 +219,17 @@ async def get_rabbitmq_stats() -> Dict[str, Any]:
     """Get RabbitMQ statistics via rabbitmqctl"""
     try:
         result = subprocess.run(
-            ["docker", "exec", "trading_rabbitmq", "rabbitmqctl", "list_connections"],
+            [
+                "docker", "exec", "trading_rabbitmq",
+                "rabbitmqctl", "list_connections"
+            ],
             capture_output=True,
             text=True
         )
 
         # Count connections (subtract header line)
-        connections = len([l for l in result.stdout.split('\n') if l.strip()]) - 1
+        lines = [line for line in result.stdout.split('\n') if line.strip()]
+        connections = len(lines) - 1
 
         return {
             "connections": max(0, connections),
@@ -349,9 +420,9 @@ async def health_check():
     """Health check endpoint"""
     db_healthy = False
     try:
-        with get_db_connection() as conn:
+        with get_db_connection():
             db_healthy = True
-    except:
+    except Exception:
         pass
 
     rabbitmq_stats = await get_rabbitmq_stats()
@@ -359,7 +430,10 @@ async def health_check():
     return {
         "status": "healthy" if db_healthy else "degraded",
         "database": "connected" if db_healthy else "disconnected",
-        "rabbitmq": "connected" if rabbitmq_stats.get("healthy") else "disconnected",
+        "rabbitmq": (
+            "connected" if rabbitmq_stats.get("healthy")
+            else "disconnected"
+        ),
         "timestamp": datetime.now(ZoneInfo("Europe/Istanbul")).isoformat()
     }
 
@@ -434,46 +508,93 @@ async def get_positions():
 
             for pos in positions_data:
                 if float(pos.get('contracts', 0)) > 0:
+                    entry = float(pos['entryPrice'])
+                    current = float(pos['markPrice'])
+                    pnl_pct = ((current - entry) / entry * 100)
+
                     positions.append(ActivePosition(
+                        position_id=str(pos.get('id', pos['symbol'])),
                         symbol=pos['symbol'],
                         side=pos['side'],
                         size=float(pos['contracts']),
-                        entryPrice=float(pos['entryPrice']),
-                        currentPrice=float(pos['markPrice']),
+                        entryPrice=entry,
+                        currentPrice=current,
                         unrealizedPnl=float(pos['unrealizedPnl']),
-                        marketType='futures'
+                        unrealizedPnlPercent=pnl_pct,
+                        marketType='futures',
+                        openedAt=pos.get('timestamp', ''),
                     ))
         else:
             # For spot, get positions from database
             with get_db_connection() as conn:
                 with conn.cursor(cursor_factory=RealDictCursor) as cur:
                     cur.execute(
-                        "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'positions')"
+                        """SELECT EXISTS (
+                            SELECT FROM information_schema.tables
+                            WHERE table_name = 'positions'
+                        )"""
                     )
                     if cur.fetchone()['exists']:
                         cur.execute(
                             """
                             SELECT
+                                id::text as position_id,
                                 symbol,
                                 side,
                                 quantity as size,
                                 entry_price,
                                 current_price,
-                                unrealized_pnl
+                                unrealized_pnl,
+                                stop_loss,
+                                take_profit,
+                                strategy_tag,
+                                opened_at,
+                                reasoning,
+                                execution_quality
                             FROM positions
                             WHERE quantity > 0
                             """
                         )
 
                         for row in cur.fetchall():
+                            entry = float(row['entry_price'])
+                            current = float(row['current_price'])
+                            pnl_pct = ((current - entry) / entry * 100)
+
+                            # Calculate hold duration
+                            hold_dur = None
+                            if row.get('opened_at'):
+                                delta = (
+                                    datetime.now(ZoneInfo("Europe/Istanbul")) -
+                                    row['opened_at']
+                                )
+                                days = delta.days
+                                hours = delta.seconds // 3600
+                                if days > 0:
+                                    hold_dur = f"{days}d {hours}h"
+                                else:
+                                    hold_dur = f"{hours}h"
+
                             positions.append(ActivePosition(
+                                position_id=row['position_id'],
                                 symbol=row['symbol'],
                                 side=row['side'],
                                 size=float(row['size']),
-                                entryPrice=float(row['entry_price']),
-                                currentPrice=float(row['current_price']),
+                                entryPrice=entry,
+                                currentPrice=current,
                                 unrealizedPnl=float(row['unrealized_pnl']),
-                                marketType='spot'
+                                unrealizedPnlPercent=pnl_pct,
+                                marketType='spot',
+                                stopLoss=row.get('stop_loss'),
+                                takeProfit=row.get('take_profit'),
+                                strategyTag=row.get('strategy_tag'),
+                                openedAt=(
+                                    row['opened_at'].isoformat()
+                                    if row.get('opened_at') else ""
+                                ),
+                                holdDuration=hold_dur,
+                                reasoning=row.get('reasoning'),
+                                executionQuality=row.get('execution_quality')
                             ))
 
         return positions
@@ -481,6 +602,251 @@ async def get_positions():
     except Exception as e:
         print(f"Error fetching positions: {e}")
         return []
+
+
+@app.get("/api/dashboard/metrics", response_model=DashboardMetrics)
+async def get_dashboard_metrics(period: str = 'today'):
+    """Get comprehensive dashboard metrics"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Check tables exist
+                cur.execute(
+                    """SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'trades'
+                    )"""
+                )
+                if not cur.fetchone()['exists']:
+                    return DashboardMetrics(
+                        totalEquity=10000.0,
+                        totalPnl=0,
+                        totalPnlPercent=0,
+                        winRate=0,
+                        totalTrades=0,
+                        winningTrades=0,
+                        losingTrades=0,
+                        openPositions=0
+                    )
+
+                # Calculate time filter
+                now = datetime.now(ZoneInfo("Europe/Istanbul"))
+                if period == 'today':
+                    start_time = now.replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                elif period == 'week':
+                    start_time = now - timedelta(days=7)
+                elif period == 'month':
+                    start_time = now - timedelta(days=30)
+                else:  # all
+                    start_time = datetime(2020, 1, 1, tzinfo=ZoneInfo(
+                        "Europe/Istanbul"
+                    ))
+
+                # Get trades stats
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) as total_trades,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins,
+                        SUM(CASE WHEN pnl < 0 THEN 1 ELSE 0 END) as losses,
+                        SUM(pnl) as total_pnl,
+                        AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                        AVG(CASE WHEN pnl < 0 THEN pnl END) as avg_loss
+                    FROM trades
+                    WHERE created_at >= %s AND status = 'FILLED'
+                    """,
+                    (start_time,)
+                )
+
+                stats = cur.fetchone()
+                total_trades = stats['total_trades'] or 0
+                wins = stats['wins'] or 0
+                losses = stats['losses'] or 0
+                total_pnl = float(stats['total_pnl'] or 0)
+                avg_win = float(stats['avg_win'] or 0)
+                avg_loss = float(stats['avg_loss'] or 0)
+
+                # Get open positions count
+                cur.execute(
+                    """SELECT COUNT(*) FROM positions
+                       WHERE quantity > 0"""
+                )
+                open_positions = cur.fetchone()[0] or 0
+
+                # Calculate metrics
+                win_rate = (wins / total_trades * 100) if total_trades else 0
+                total_equity = 10000.0 + total_pnl
+                pnl_percent = (total_pnl / 10000.0 * 100)
+
+                profit_factor = None
+                if avg_loss != 0:
+                    profit_factor = abs(avg_win / avg_loss)
+
+                return DashboardMetrics(
+                    totalEquity=total_equity,
+                    totalPnl=total_pnl,
+                    totalPnlPercent=pnl_percent,
+                    winRate=win_rate,
+                    totalTrades=total_trades,
+                    winningTrades=wins,
+                    losingTrades=losses,
+                    openPositions=open_positions,
+                    profitFactor=profit_factor,
+                    averageWin=avg_win,
+                    averageLoss=avg_loss
+                )
+
+    except Exception as e:
+        print(f"Error fetching dashboard metrics: {e}")
+        return DashboardMetrics(
+            totalEquity=10000.0,
+            totalPnl=0,
+            totalPnlPercent=0,
+            winRate=0,
+            totalTrades=0,
+            winningTrades=0,
+            losingTrades=0,
+            openPositions=0
+        )
+
+
+@app.get("/api/dashboard/equity-curve")
+async def get_equity_curve(period: str = 'today'):
+    """Get equity curve data"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'trades'
+                    )"""
+                )
+                if not cur.fetchone()['exists']:
+                    return []
+
+                # Calculate time filter
+                now = datetime.now(ZoneInfo("Europe/Istanbul"))
+                if period == 'today':
+                    start_time = now.replace(
+                        hour=0, minute=0, second=0, microsecond=0
+                    )
+                elif period == 'week':
+                    start_time = now - timedelta(days=7)
+                elif period == 'month':
+                    start_time = now - timedelta(days=30)
+                else:
+                    start_time = datetime(2020, 1, 1, tzinfo=ZoneInfo(
+                        "Europe/Istanbul"
+                    ))
+
+                cur.execute(
+                    """
+                    SELECT
+                        created_at as timestamp,
+                        SUM(pnl) OVER (
+                            ORDER BY created_at
+                        ) as cumulative_pnl
+                    FROM trades
+                    WHERE created_at >= %s AND status = 'FILLED'
+                    ORDER BY created_at
+                    """,
+                    (start_time,)
+                )
+
+                equity_data = []
+                max_equity = 10000.0
+
+                for row in cur.fetchall():
+                    equity = 10000.0 + float(row['cumulative_pnl'])
+                    max_equity = max(max_equity, equity)
+                    drawdown = ((max_equity - equity) / max_equity * 100)
+
+                    equity_data.append({
+                        "timestamp": row['timestamp'].isoformat(),
+                        "equity": equity,
+                        "drawdown": drawdown,
+                        "displayTime": row['timestamp'].strftime("%H:%M")
+                    })
+
+                return equity_data
+
+    except Exception as e:
+        print(f"Error fetching equity curve: {e}")
+        return []
+
+
+@app.get("/api/dashboard/strategy-comparison")
+async def get_strategy_comparison(period: str = 'all'):
+    """Get strategy comparison stats"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    """SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'trades'
+                    )"""
+                )
+                if not cur.fetchone()['exists']:
+                    return []
+
+                cur.execute(
+                    """
+                    SELECT
+                        strategy_tag as strategy,
+                        COUNT(*) as total_trades,
+                        SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END)::float /
+                            COUNT(*)::float * 100 as win_rate,
+                        SUM(pnl) as total_pnl,
+                        AVG(CASE WHEN pnl > 0 THEN pnl END) as avg_win,
+                        AVG(CASE WHEN pnl < 0 THEN pnl END) as avg_loss
+                    FROM trades
+                    WHERE strategy_tag IS NOT NULL AND status = 'FILLED'
+                    GROUP BY strategy_tag
+                    """
+                )
+
+                strategies = []
+                for row in cur.fetchall():
+                    avg_win = float(row['avg_win'] or 0)
+                    avg_loss = float(row['avg_loss'] or 0)
+                    profit_factor = (
+                        abs(avg_win / avg_loss) if avg_loss != 0 else 1.0
+                    )
+
+                    strategies.append({
+                        "strategy": row['strategy'],
+                        "totalTrades": row['total_trades'],
+                        "winRate": float(row['win_rate'] or 0),
+                        "totalPnl": float(row['total_pnl'] or 0),
+                        "avgWin": avg_win,
+                        "avgLoss": avg_loss,
+                        "sharpeRatio": 1.5,  # TODO: Calculate from returns
+                        "maxDrawdown": 5.0,  # TODO: Calculate actual
+                        "profitFactor": profit_factor
+                    })
+
+                return strategies
+
+    except Exception as e:
+        print(f"Error fetching strategy comparison: {e}")
+        return []
+
+
+@app.get("/api/dashboard/benchmark-comparison")
+async def get_benchmark_comparison(period: str = 'week'):
+    """Get benchmark comparison data"""
+    # TODO: Implement with InfluxDB historical price data
+    # For now, return mock data structure
+    return {
+        "data": [],
+        "portfolioAlpha": 0.0,
+        "portfolioBeta": 1.0,
+        "correlation": {"btc": 0.0, "eth": 0.0}
+    }
 
 
 if __name__ == "__main__":
