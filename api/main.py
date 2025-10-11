@@ -168,6 +168,80 @@ class BenchmarkMetrics(BaseModel):
     correlation: Dict[str, float]
 
 
+# Trade Journal Models
+class TradeJournalCreate(BaseModel):
+    position_id: Optional[str] = None
+    symbol: str
+    side: str
+    strategy_tag: str
+    entry_price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    setup_type: str
+    timeframe: str
+    reasoning: str
+    technical_indicators: Optional[List[str]] = None
+    market_condition: Optional[str] = None
+    confidence_level: int
+    chart_screenshot: Optional[str] = None
+
+
+class TradeJournalUpdate(BaseModel):
+    setup_type: Optional[str] = None
+    reasoning: Optional[str] = None
+    confidence_level: Optional[int] = None
+    execution_quality: Optional[int] = None
+    slippage: Optional[float] = None
+    entry_timing: Optional[str] = None
+    status: Optional[str] = None
+
+
+class TradeReview(BaseModel):
+    exit_reason: str
+    execution_quality: int
+    entry_timing: str
+    emotional_state: List[str]
+    rule_following: int
+    what_went_well: str
+    what_went_wrong: str
+    lessons_learned: str
+    tags: List[str]
+
+
+class TradeJournal(BaseModel):
+    id: str
+    position_id: Optional[str]
+    symbol: str
+    side: str
+    strategy_tag: str
+    entry_price: float
+    current_price: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    setup_type: str
+    timeframe: str
+    reasoning: str
+    technical_indicators: Optional[Dict] = None
+    market_condition: Optional[str] = None
+    confidence_level: int
+    risk_reward_ratio: Optional[float] = None
+    execution_quality: Optional[int] = None
+    slippage: Optional[float] = None
+    entry_timing: Optional[str] = None
+    exit_reason: Optional[str] = None
+    emotional_state: Optional[List[str]] = None
+    rule_following: Optional[int] = None
+    what_went_well: Optional[str] = None
+    what_went_wrong: Optional[str] = None
+    lessons_learned: Optional[str] = None
+    tags: Optional[List[str]] = None
+    status: str
+    created_at: str
+    updated_at: str
+    review_completed_at: Optional[str] = None
+
+
 @contextmanager
 def get_db_connection():
     """Context manager for database connections"""
@@ -847,6 +921,431 @@ async def get_benchmark_comparison(period: str = 'week'):
         "portfolioBeta": 1.0,
         "correlation": {"btc": 0.0, "eth": 0.0}
     }
+
+
+# ============================================================================
+# TRADE JOURNAL ENDPOINTS
+# ============================================================================
+
+@app.post("/api/journal/trades", response_model=Dict[str, Any])
+async def create_journal_entry(entry: TradeJournalCreate):
+    """Create new trade journal entry"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Calculate risk-reward ratio
+                rr_ratio = None
+                if entry.stop_loss and entry.take_profit:
+                    risk = abs(entry.entry_price - entry.stop_loss)
+                    reward = abs(entry.take_profit - entry.entry_price)
+                    if risk > 0:
+                        rr_ratio = reward / risk
+
+                # Convert technical_indicators to JSONB
+                tech_indicators = None
+                if entry.technical_indicators:
+                    tech_indicators = {
+                        "indicators": entry.technical_indicators
+                    }
+
+                cur.execute(
+                    """
+                    INSERT INTO trade_journal (
+                        position_id, setup_type, timeframe, reasoning,
+                        technical_indicators, market_condition,
+                        confidence_level, chart_screenshot,
+                        risk_reward_ratio, status
+                    ) VALUES (
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, 'planned'
+                    )
+                    RETURNING id, created_at
+                    """,
+                    (
+                        entry.position_id,
+                        entry.setup_type,
+                        entry.timeframe,
+                        entry.reasoning,
+                        tech_indicators,
+                        entry.market_condition,
+                        entry.confidence_level,
+                        entry.chart_screenshot,
+                        rr_ratio
+                    )
+                )
+
+                result = cur.fetchone()
+                return {
+                    "id": str(result['id']),
+                    "created_at": result['created_at'].isoformat(),
+                    "risk_reward_ratio": float(rr_ratio) if rr_ratio else None
+                }
+
+    except Exception as e:
+        print(f"Error creating journal entry: {e}")
+        raise
+
+
+@app.get("/api/journal/trades", response_model=List[TradeJournal])
+async def get_journal_entries(
+    status: Optional[str] = None,
+    strategy: Optional[str] = None,
+    limit: int = 50
+):
+    """Get trade journal entries with optional filtering"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Check if table exists
+                cur.execute(
+                    """SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'trade_journal'
+                    )"""
+                )
+                if not cur.fetchone()['exists']:
+                    return []
+
+                # Build query with filters
+                query = """
+                    SELECT
+                        tj.id::text,
+                        tj.position_id::text,
+                        p.symbol,
+                        p.side,
+                        p.strategy_tag,
+                        p.entry_price,
+                        p.current_price,
+                        p.unrealized_pnl,
+                        p.stop_loss,
+                        p.take_profit,
+                        tj.setup_type,
+                        tj.timeframe,
+                        tj.reasoning,
+                        tj.technical_indicators,
+                        tj.market_condition,
+                        tj.confidence_level,
+                        tj.risk_reward_ratio,
+                        tj.execution_quality,
+                        tj.slippage,
+                        tj.entry_timing,
+                        tj.exit_reason,
+                        tj.emotional_state,
+                        tj.rule_following,
+                        tj.what_went_well,
+                        tj.what_went_wrong,
+                        tj.lessons_learned,
+                        tj.tags,
+                        tj.status,
+                        tj.created_at,
+                        tj.updated_at,
+                        tj.review_completed_at
+                    FROM trade_journal tj
+                    LEFT JOIN positions p ON tj.position_id = p.id
+                    WHERE 1=1
+                """
+
+                params = []
+                if status:
+                    query += " AND tj.status = %s"
+                    params.append(status)
+
+                if strategy:
+                    query += " AND p.strategy_tag = %s"
+                    params.append(strategy)
+
+                query += " ORDER BY tj.created_at DESC LIMIT %s"
+                params.append(limit)
+
+                cur.execute(query, params)
+
+                entries = []
+                for row in cur.fetchall():
+                    # Extract technical indicators
+                    tech_ind = row.get('technical_indicators')
+                    if tech_ind:
+                        tech_ind = tech_ind
+
+                    entries.append(TradeJournal(
+                        id=row['id'],
+                        position_id=row['position_id'],
+                        symbol=row['symbol'] or '',
+                        side=row['side'] or '',
+                        strategy_tag=row['strategy_tag'] or '',
+                        entry_price=float(row['entry_price'] or 0),
+                        current_price=(
+                            float(row['current_price'])
+                            if row.get('current_price') else None
+                        ),
+                        unrealized_pnl=(
+                            float(row['unrealized_pnl'])
+                            if row.get('unrealized_pnl') else None
+                        ),
+                        stop_loss=(
+                            float(row['stop_loss'])
+                            if row.get('stop_loss') else None
+                        ),
+                        take_profit=(
+                            float(row['take_profit'])
+                            if row.get('take_profit') else None
+                        ),
+                        setup_type=row['setup_type'],
+                        timeframe=row['timeframe'],
+                        reasoning=row['reasoning'],
+                        technical_indicators=tech_ind,
+                        market_condition=row.get('market_condition'),
+                        confidence_level=row['confidence_level'],
+                        risk_reward_ratio=(
+                            float(row['risk_reward_ratio'])
+                            if row.get('risk_reward_ratio') else None
+                        ),
+                        execution_quality=row.get('execution_quality'),
+                        slippage=(
+                            float(row['slippage'])
+                            if row.get('slippage') else None
+                        ),
+                        entry_timing=row.get('entry_timing'),
+                        exit_reason=row.get('exit_reason'),
+                        emotional_state=row.get('emotional_state'),
+                        rule_following=row.get('rule_following'),
+                        what_went_well=row.get('what_went_well'),
+                        what_went_wrong=row.get('what_went_wrong'),
+                        lessons_learned=row.get('lessons_learned'),
+                        tags=row.get('tags'),
+                        status=row['status'],
+                        created_at=row['created_at'].isoformat(),
+                        updated_at=row['updated_at'].isoformat(),
+                        review_completed_at=(
+                            row['review_completed_at'].isoformat()
+                            if row.get('review_completed_at') else None
+                        )
+                    ))
+
+                return entries
+
+    except Exception as e:
+        print(f"Error fetching journal entries: {e}")
+        return []
+
+
+@app.patch("/api/journal/trades/{journal_id}")
+async def update_journal_entry(
+    journal_id: str,
+    update: TradeJournalUpdate
+):
+    """Update trade journal entry"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Build update query dynamically
+                update_fields = []
+                params = []
+
+                if update.setup_type is not None:
+                    update_fields.append("setup_type = %s")
+                    params.append(update.setup_type)
+
+                if update.reasoning is not None:
+                    update_fields.append("reasoning = %s")
+                    params.append(update.reasoning)
+
+                if update.confidence_level is not None:
+                    update_fields.append("confidence_level = %s")
+                    params.append(update.confidence_level)
+
+                if update.execution_quality is not None:
+                    update_fields.append("execution_quality = %s")
+                    params.append(update.execution_quality)
+
+                if update.slippage is not None:
+                    update_fields.append("slippage = %s")
+                    params.append(update.slippage)
+
+                if update.entry_timing is not None:
+                    update_fields.append("entry_timing = %s")
+                    params.append(update.entry_timing)
+
+                if update.status is not None:
+                    update_fields.append("status = %s")
+                    params.append(update.status)
+
+                if not update_fields:
+                    return {"success": True, "message": "No fields to update"}
+
+                params.append(journal_id)
+                query = f"""
+                    UPDATE trade_journal
+                    SET {', '.join(update_fields)}
+                    WHERE id = %s
+                """
+
+                cur.execute(query, params)
+                return {"success": True, "updated": cur.rowcount}
+
+    except Exception as e:
+        print(f"Error updating journal entry: {e}")
+        raise
+
+
+@app.post("/api/journal/trades/{journal_id}/review")
+async def add_trade_review(journal_id: str, review: TradeReview):
+    """Add post-trade review to journal entry"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE trade_journal
+                    SET
+                        exit_reason = %s,
+                        execution_quality = %s,
+                        entry_timing = %s,
+                        emotional_state = %s,
+                        rule_following = %s,
+                        what_went_well = %s,
+                        what_went_wrong = %s,
+                        lessons_learned = %s,
+                        tags = %s,
+                        review_completed_at = NOW(),
+                        status = 'closed'
+                    WHERE id = %s
+                    RETURNING review_completed_at
+                    """,
+                    (
+                        review.exit_reason,
+                        review.execution_quality,
+                        review.entry_timing,
+                        review.emotional_state,
+                        review.rule_following,
+                        review.what_went_well,
+                        review.what_went_wrong,
+                        review.lessons_learned,
+                        review.tags,
+                        journal_id
+                    )
+                )
+
+                result = cur.fetchone()
+                if result:
+                    return {
+                        "success": True,
+                        "review_completed_at": result[0].isoformat()
+                    }
+                else:
+                    return {"success": False, "error": "Entry not found"}
+
+    except Exception as e:
+        print(f"Error adding trade review: {e}")
+        raise
+
+
+@app.get("/api/journal/statistics")
+async def get_journal_statistics(period: str = 'month'):
+    """Get journal statistics and insights"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Check if table exists
+                cur.execute(
+                    """SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'trade_journal'
+                    )"""
+                )
+                if not cur.fetchone()['exists']:
+                    return {
+                        "setupWinRates": {},
+                        "emotionImpact": {},
+                        "executionQuality": {"avg": 0, "trend": 0},
+                        "commonMistakes": [],
+                        "bestSetups": []
+                    }
+
+                # Calculate time filter
+                now = datetime.now(ZoneInfo("Europe/Istanbul"))
+                if period == 'week':
+                    start_time = now - timedelta(days=7)
+                elif period == 'month':
+                    start_time = now - timedelta(days=30)
+                else:  # all
+                    start_time = datetime(2020, 1, 1, tzinfo=ZoneInfo(
+                        "Europe/Istanbul"
+                    ))
+
+                # Setup win rates
+                cur.execute(
+                    """
+                    SELECT
+                        setup_type,
+                        COUNT(*) as total,
+                        AVG(execution_quality) as avg_quality
+                    FROM trade_journal
+                    WHERE created_at >= %s
+                        AND setup_type IS NOT NULL
+                    GROUP BY setup_type
+                    """,
+                    (start_time,)
+                )
+
+                setup_stats = {}
+                for row in cur.fetchall():
+                    setup_stats[row['setup_type']] = {
+                        "total": row['total'],
+                        "avgQuality": float(row['avg_quality'] or 0)
+                    }
+
+                # Execution quality trend
+                cur.execute(
+                    """
+                    SELECT AVG(execution_quality) as avg_quality
+                    FROM trade_journal
+                    WHERE created_at >= %s
+                        AND execution_quality IS NOT NULL
+                    """,
+                    (start_time,)
+                )
+
+                avg_quality = cur.fetchone()
+                exec_quality_avg = float(avg_quality['avg_quality'] or 0)
+
+                # Common tags (mistakes/wins)
+                cur.execute(
+                    """
+                    SELECT unnest(tags) as tag, COUNT(*) as count
+                    FROM trade_journal
+                    WHERE created_at >= %s AND tags IS NOT NULL
+                    GROUP BY tag
+                    ORDER BY count DESC
+                    LIMIT 10
+                    """,
+                    (start_time,)
+                )
+
+                common_tags = [
+                    row['tag'] for row in cur.fetchall()
+                ]
+
+                return {
+                    "setupWinRates": setup_stats,
+                    "emotionImpact": {},  # TODO: Correlation analysis
+                    "executionQuality": {
+                        "avg": exec_quality_avg,
+                        "trend": 0  # TODO: Calculate trend
+                    },
+                    "commonMistakes": [
+                        t for t in common_tags if 'mistake' in t.lower()
+                    ],
+                    "bestSetups": list(setup_stats.keys())[:3]
+                }
+
+    except Exception as e:
+        print(f"Error fetching journal statistics: {e}")
+        return {
+            "setupWinRates": {},
+            "emotionImpact": {},
+            "executionQuality": {"avg": 0, "trend": 0},
+            "commonMistakes": [],
+            "bestSetups": []
+        }
 
 
 if __name__ == "__main__":
